@@ -69,6 +69,10 @@ class BaseTranslator(ABC):
         """
         self.cache.add_params(k, v)
 
+    def health_check(self) -> None:
+        """Validate translator availability before starting the PDF pipeline."""
+        self.translate("Hello", ignore_cache=True)
+
     def translate(self, text, ignore_cache=False, rate_limit_params: dict = None):
         """
         Translate the text, and the other part should call this method.

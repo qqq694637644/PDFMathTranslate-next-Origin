@@ -1,0 +1,436 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PDFMathTranslate GPT Actions Translator",
+    "description": "Personal durable queue used by Custom GPT sessions to translate official BabelDOC requests.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/actions/queue/status": {
+      "get": {
+        "summary": "Get Queue Status",
+        "operationId": "getQueueStatus",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueStatusResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/actions/batches/next": {
+      "post": {
+        "summary": "Get Next Batch",
+        "operationId": "getNextBatch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/NextBatchRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NextBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/actions/batches/submit": {
+      "post": {
+        "summary": "Submit Batch",
+        "operationId": "submitBatch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActionRequestItem": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "claim_token": {
+            "type": "string",
+            "title": "Claim Token"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "LLM_BATCH",
+              "SIMPLE_TEXT"
+            ],
+            "title": "Mode"
+          },
+          "lang_in": {
+            "type": "string",
+            "title": "Lang In"
+          },
+          "lang_out": {
+            "type": "string",
+            "title": "Lang Out"
+          },
+          "input": {
+            "type": "string",
+            "title": "Input"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "claim_token",
+          "mode",
+          "lang_in",
+          "lang_out",
+          "input"
+        ],
+        "title": "ActionRequestItem"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "NextBatchRequest": {
+        "properties": {
+          "max_requests": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 32.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Requests"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "NextBatchRequest"
+      },
+      "NextBatchResponse": {
+        "properties": {
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/ActionRequestItem"
+            },
+            "type": "array",
+            "title": "Requests"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "requests"
+        ],
+        "title": "NextBatchResponse"
+      },
+      "QueueStatusResponse": {
+        "properties": {
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "pending": {
+            "type": "integer",
+            "title": "Pending"
+          },
+          "claimed": {
+            "type": "integer",
+            "title": "Claimed"
+          },
+          "completed": {
+            "type": "integer",
+            "title": "Completed"
+          },
+          "worker_alive": {
+            "type": "boolean",
+            "title": "Worker Alive"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "pending",
+          "claimed",
+          "completed",
+          "worker_alive"
+        ],
+        "title": "QueueStatusResponse"
+      },
+      "SubmitBatchRequest": {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SubmitResultItem"
+            },
+            "type": "array",
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Results"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "title": "SubmitBatchRequest"
+      },
+      "SubmitBatchResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SubmitItemResponse"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "title": "SubmitBatchResponse"
+      },
+      "SubmitItemResponse": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "COMPLETED",
+              "IDEMPOTENT",
+              "CONFLICT",
+              "CANCELED",
+              "ERROR"
+            ],
+            "title": "Status"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "status"
+        ],
+        "title": "SubmitItemResponse"
+      },
+      "SubmitResultItem": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id"
+          },
+          "claim_token": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Claim Token"
+          },
+          "output": {
+            "type": "string",
+            "maxLength": 30000,
+            "minLength": 1,
+            "title": "Output"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "claim_token",
+          "output"
+        ],
+        "title": "SubmitResultItem"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://example.com",
+      "description": "Replace with the public HTTPS endpoint of pdf2zh-action-api"
+    }
+  ]
+}

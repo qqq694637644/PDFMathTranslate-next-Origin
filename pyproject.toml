@@ -74,6 +74,7 @@ build-backend = "hatchling.build"
 pdf2zh = "pdf2zh_next.main:cli"
 pdf2zh2 = "pdf2zh_next.main:cli"
 pdf2zh_next = "pdf2zh_next.main:cli"
+pdf2zh-action-api = "pdf2zh_next.gptaction_api:main"
 
 [tool.flake8]
 ignore = ["E203", "E261", "E501", "W503", "E741"]

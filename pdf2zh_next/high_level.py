@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.translator import get_term_translator
 from pdf2zh_next.translator import get_translator
+from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
 from pdf2zh_next.utils import asynchronize
 
 
@@ -108,6 +109,26 @@ class SubprocessCrashError(TranslationError):
 logger = logging.getLogger(__name__)
 
 
+def _start_gptaction_run(
+    settings: SettingsModel,
+) -> tuple[GPTActionQueue | None, str | None]:
+    translator_settings = settings.translate_engine_settings
+    if (
+        translator_settings is None
+        or translator_settings.translate_engine_type != "GPTAction"
+    ):
+        return None, None
+    queue = GPTActionQueue(translator_settings.gptaction_queue_db)
+    run_id = queue.start_run()
+    translator_settings._gptaction_run_id = run_id
+    logger.info(
+        "Started GPT Action translation run %s; queue=%s",
+        run_id,
+        queue.database_path,
+    )
+    return queue, run_id
+
+
 def _translate_wrapper(
     settings: SettingsModel,
     file: Path,
@@ -129,6 +150,14 @@ def _translate_wrapper(
         logging.basicConfig(level=logging.INFO, handlers=[queue_handler])
 
         config = create_babeldoc_config(settings, file)
+        if hasattr(config.translator, "bind_cancel_event"):
+            config.translator.bind_cancel_event(cancel_event)
+        if (
+            config.term_extraction_translator is not None
+            and config.term_extraction_translator is not config.translator
+            and hasattr(config.term_extraction_translator, "bind_cancel_event")
+        ):
+            config.term_extraction_translator.bind_cancel_event(cancel_event)
 
         def cancel_recv_thread():
             try:
@@ -623,24 +652,42 @@ async def do_translate_async_stream(
     if not file.exists():
         raise FileNotFoundError(f"file {file} not found")
 
-    # 开始翻译
-    translate_func = partial(_translate_in_subprocess, settings, file)
-
-    if settings.basic.debug:
-        babeldoc_config = create_babeldoc_config(settings, file)
-        logger.debug("debug mode, translate in main process")
-        translate_func = partial(babeldoc_translate, translation_config=babeldoc_config)
-    else:
-        logger.info("translate in subprocess")
+    gptaction_queue, gptaction_run_id = _start_gptaction_run(settings)
+    gptaction_run_terminal = False
 
     try:
+        # 开始翻译
+        translate_func = partial(_translate_in_subprocess, settings, file)
+
+        if settings.basic.debug:
+            babeldoc_config = create_babeldoc_config(settings, file)
+            logger.debug("debug mode, translate in main process")
+            translate_func = partial(
+                babeldoc_translate,
+                translation_config=babeldoc_config,
+            )
+        else:
+            logger.info("translate in subprocess")
+
         async for event in translate_func():
-            yield event
             if settings.basic.debug:
                 logger.debug(event)
             if event["type"] == "finish":
+                if gptaction_queue is not None and gptaction_run_id is not None:
+                    gptaction_queue.complete_run(gptaction_run_id)
+                    gptaction_run_terminal = True
+                yield event
                 break
+            yield event
+    except asyncio.CancelledError:
+        if gptaction_queue is not None and gptaction_run_id is not None:
+            gptaction_queue.cancel_run(gptaction_run_id)
+            gptaction_run_terminal = True
+        raise
     except TranslationError as e:
+        if gptaction_queue is not None and gptaction_run_id is not None:
+            gptaction_queue.fail_run(gptaction_run_id)
+            gptaction_run_terminal = True
         # Log and re-raise structured errors
         logger.error(f"Translation error: {e}")
         if isinstance(e, BabeldocError) and e.original_error:
@@ -658,6 +705,18 @@ async def do_translate_async_stream(
         }
         yield error_event
         raise  # Re-raise the exception so that the caller can handle it if needed
+    except Exception:
+        if gptaction_queue is not None and gptaction_run_id is not None:
+            gptaction_queue.fail_run(gptaction_run_id)
+            gptaction_run_terminal = True
+        raise
+    finally:
+        if (
+            gptaction_queue is not None
+            and gptaction_run_id is not None
+            and not gptaction_run_terminal
+        ):
+            gptaction_queue.cancel_run(gptaction_run_id)
 
 
 async def do_translate_file_async(

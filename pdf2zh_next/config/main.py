@@ -32,7 +32,9 @@ from pdf2zh_next.const import WRITE_TEMP_CONFIG_FILE
 
 _translation_engine_flag_names = [x.cli_flag_name for x in TRANSLATION_ENGINE_METADATA]
 _term_translation_engine_flag_names = [
-    f"term_{x.cli_flag_name}" for x in TRANSLATION_ENGINE_METADATA if x.support_llm
+    f"term_{x.cli_flag_name}"
+    for x in TRANSLATION_ENGINE_METADATA
+    if x.support_term_extraction
 ]
 
 log = logging.getLogger(__name__)

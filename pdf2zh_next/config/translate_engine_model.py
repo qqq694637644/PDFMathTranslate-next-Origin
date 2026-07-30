@@ -1,15 +1,18 @@
 import logging
+import os
 import re
 import shlex
 import typing
 from dataclasses import dataclass
 from inspect import getdoc
 from types import NoneType
+from typing import ClassVar
 from typing import Literal
 from typing import TypeAlias
 
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import create_model
 
 # any field in SENSITIVE_FIELDS will be masked in GUI
@@ -892,6 +895,52 @@ class CLISettings(BaseModel):
                 raise ValueError("clitranslator_postprocess_command cannot be empty")
 
 
+class GPTActionSettings(BaseModel):
+    """Custom GPT Actions durable queue settings."""
+
+    translate_engine_type: Literal["GPTAction"] = Field(default="GPTAction")
+    support_llm: Literal["yes", "no"] = Field(
+        default="yes", description="Whether the translator supports LLM"
+    )
+    support_term_extraction: ClassVar[bool] = False
+
+    gptaction_queue_db: str | None = Field(
+        default=None,
+        description=(
+            "SQLite queue path. Defaults to GPT_ACTION_QUEUE_DB or "
+            "~/.config/pdf2zh/gptaction-queue.sqlite3"
+        ),
+    )
+    gptaction_protocol_version: str = Field(
+        default="1", description="GPT Actions translation protocol version"
+    )
+    gptaction_poll_interval_seconds: str = Field(
+        default="0.5", description="Queue polling interval in seconds"
+    )
+    _gptaction_run_id: str | None = PrivateAttr(default=None)
+
+    def validate_settings(self) -> None:
+        from pdf2zh_next.translator.gptaction_queue import resolve_queue_db_path
+
+        configured_path = resolve_queue_db_path(self.gptaction_queue_db)
+        environment_path = os.getenv("GPT_ACTION_QUEUE_DB")
+        if self.gptaction_queue_db and environment_path:
+            resolved_environment_path = resolve_queue_db_path(environment_path)
+            if configured_path != resolved_environment_path:
+                raise ValueError(
+                    "GPT Action queue path mismatch: --gptaction-queue-db and "
+                    "GPT_ACTION_QUEUE_DB must resolve to the same absolute path"
+                )
+        self.gptaction_queue_db = str(configured_path)
+        self.gptaction_protocol_version = _clean_string(self.gptaction_protocol_version)
+        if not self.gptaction_protocol_version:
+            raise ValueError("GPT Action protocol version is required")
+        self.gptaction_poll_interval_seconds = _check_if_positive_float(
+            _clean_string(self.gptaction_poll_interval_seconds),
+            field="GPT Action poll interval",
+        )
+
+
 ## Please add the translator configuration class above this location.
 
 # 所有翻译引擎
@@ -920,6 +969,7 @@ TRANSLATION_ENGINE_SETTING_TYPE: TypeAlias = (
     | OpenAICompatibleSettings
     | ClaudeCodeSettings
     | CLISettings
+    | GPTActionSettings
 )
 
 # 不支持的翻译引擎
@@ -945,6 +995,7 @@ class TranslationEngineMetadata:
     cli_detail_field_name: str | None
     setting_model_type: type[BaseModel]
     support_llm: bool
+    support_term_extraction: bool
 
     def __init__(
         self,
@@ -962,6 +1013,9 @@ class TranslationEngineMetadata:
             (sl := setting_model_type.model_fields.get("support_llm", None))
             and sl.default == "yes"
         ) or False
+        self.support_term_extraction = bool(
+            getattr(setting_model_type, "support_term_extraction", self.support_llm)
+        )
 
 
 args = typing.get_args(TRANSLATION_ENGINE_SETTING_TYPE)
@@ -999,7 +1053,7 @@ del dedup_set
 
 _TERM_EXTRACTION_ENGINE_SETTING_TYPE: type[BaseModel] | None = None
 for metadata in TRANSLATION_ENGINE_METADATA:
-    if not metadata.support_llm:
+    if not metadata.support_term_extraction:
         continue
     if _TERM_EXTRACTION_ENGINE_SETTING_TYPE is None:
         _TERM_EXTRACTION_ENGINE_SETTING_TYPE = metadata.setting_model_type
@@ -1012,7 +1066,7 @@ assert _TERM_EXTRACTION_ENGINE_SETTING_TYPE is not None, (
     "No LLM-capable translation engines configured"
 )
 
-# 术语提取引擎：仅包含 support_llm == \"yes\" 的翻译引擎设置类型
+# 术语提取引擎：仅包含明确支持术语提取的翻译引擎设置类型
 TERM_EXTRACTION_ENGINE_SETTING_TYPE: TypeAlias = _TERM_EXTRACTION_ENGINE_SETTING_TYPE
 
 
@@ -1078,7 +1132,7 @@ class TermTranslationEngineMetadata:
 TERM_EXTRACTION_ENGINE_METADATA: list[TermTranslationEngineMetadata] = []
 
 for metadata in TRANSLATION_ENGINE_METADATA:
-    if not metadata.support_llm:
+    if not metadata.support_term_extraction:
         continue
     term_setting_model_type = _build_term_setting_model(metadata.setting_model_type)
     TERM_EXTRACTION_ENGINE_METADATA.append(
