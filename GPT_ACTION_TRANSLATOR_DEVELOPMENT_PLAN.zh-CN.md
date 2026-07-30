@@ -85,7 +85,7 @@ pdf2zh_next/config/translate_engine_model.py
 from babeldoc.format.pdf.high_level import async_translate as babeldoc_translate
 ```
 
-因此 GPT Actions 只需要实现一个新的翻译器和请求队列，不需要拆分 analysis/build，也不需要保存完整 BabelDOC Document。
+因此 GPT Actions 只需要实现一个新的翻译器和请求队列，不需要拆分 analysis/build，也不需要将完整 BabelDOC Document 序列化为 checkpoint。当前官方分片对应的 Document 在等待 GPT 翻译期间仍会驻留内存。
 
 该方案删除以下复杂性：
 
@@ -201,17 +201,35 @@ GPT 已提交后、BaseTranslator 写 cache 前 worker 可能崩溃
 
 GPTActionTranslator 应覆盖公共 `translate()` 和 `llm_translate()`，先查询 durable queue result。
 
-fingerprint 至少包含：
+fingerprint 使用固定 canonical 公式：
 
 ```text
-protocol_version
-mode
-完整 input/prompt
-lang_in
-lang_out
-translator config fingerprint
-custom prompt / glossary 影响参数
+SHA-256(
+  protocol_version
+  + mode
+  + lang_in
+  + lang_out
+  + 完整 input_text / prompt
+  + 实际影响翻译内容的 custom prompt / glossary 设置
+)
 ```
+
+必须明确排除所有运行和调度参数：
+
+```text
+run_id
+request_id
+队列数据库路径
+API key、host、port
+claim TTL 和 claim_token
+pool_max_workers
+qps
+进程、线程和 PID 信息
+source part index
+时间戳
+```
+
+对于 `LLM_BATCH`，完整 BabelDOC prompt 已包含主要翻译语义；仍需把语言、协议版本和真正影响输出的外部 prompt/glossary 设置纳入 fingerprint。
 
 相同 fingerprint 已完成时直接返回结果，不再次等待 GPT。
 
@@ -225,7 +243,7 @@ custom prompt / glossary 影响参数
 pdf2zh_next/translator/gptaction_queue.py
 ```
 
-队列数据库与现有翻译缓存分离，避免 mode、claim 和 job 生命周期语义混淆。
+队列数据库与现有翻译缓存分离，避免 mode、claim 和 run 生命周期语义混淆。
 
 ### 6.1 请求状态
 
@@ -233,43 +251,42 @@ pdf2zh_next/translator/gptaction_queue.py
 PENDING
 CLAIMED
 COMPLETED
-FAILED
 CANCELED
-ABANDONED
 ```
 
 ### 6.2 最小字段
 
+`translation_runs`：
+
 ```text
-request_id
-job_id
-worker_run_id
-protocol_version
-mode
-fingerprint
-input_text
-input_chars
-status
-claim_token
-claimed_until
-output_text
-error_code
-error_message
+run_id
+status              # ACTIVE / COMPLETED / FAILED / CANCELED
 created_at
 updated_at
 completed_at
 ```
 
-可选诊断字段：
+数据库用部分唯一索引保证最多一个 `ACTIVE` run。
+
+`translation_requests`：
 
 ```text
-claim_count
-consumer_label
-worker_pid
-source_part_index
+request_id
+run_id
+protocol_version
+mode
+fingerprint
+input_text
+status
+claim_token
+claimed_until
+output_text
+created_at
+updated_at
+completed_at
 ```
 
-`consumer_label` 只用于日志，不作为可靠 ChatGPT 身份。
+第一版不把 `claim_count`、`consumer_label`、`worker_pid`、`source_part_index` 或 heartbeat 放入协议和核心 schema。需要时仅写本地日志，后续有明确诊断价值再扩展。
 
 ### 6.3 原子领取
 
@@ -279,11 +296,14 @@ source_part_index
 BEGIN IMMEDIATE
 → 回收 claim 已过期的请求
 → 选择 PENDING 请求
-→ 写入随机 claim_token 和 claimed_until
+→ request 首次领取时生成随机稳定 claim_token
+→ 再次领取时复用同一 claim_token，只更新 claimed_until
 → COMMIT
 ```
 
 不能只查询最旧请求，也不能使用进程内软锁。
+
+第一版的 `claim_token` 是 request-scoped submission token，不是每次 lease 都变化的 owner token。它用于防止 GPT 把结果提交到错误 request；同一请求过期后被另一会话重新领取时，两边会看到同一个 token，并按 first-result-wins 竞争提交。这样无需 claim 历史表，也不会因为 token 被覆盖而拒绝先前领取者。
 
 ### 6.4 claim lease
 
@@ -298,19 +318,46 @@ claim TTL 可配置
 
 原因：Custom GPT 翻译一个包含多个内部请求的 Action batch 可能明显超过 120 秒。
 
-claim 过期后请求可重新领取。最先合法提交者完成请求；后续相同结果幂等，不同结果返回冲突。
+claim 过期后请求可重新领取，但 claim TTL 只负责避免多个会话同时领取，不决定译文所有权。提交使用 first-result-wins：
+
+```text
+请求为 PENDING 或 CLAIMED，且尚未完成：
+  claim_token 必须等于该 request_id 的稳定 token
+  即使 claimed_until 已经过期，也接受第一个有效非空结果
+
+请求已经 COMPLETED：
+  相同 output → 幂等成功
+  不同 output → 返回冲突，不覆盖
+
+请求已经 CANCELED：
+  拒绝提交
+```
+
+claim 过期后新旧会话都可能完成翻译，最终只有第一个提交成功。这样不会因为 GPT 翻译稍慢于 TTL 而丢弃已经完成的结果。
 
 ### 6.5 任务隔离
 
 第一版限制：
 
 ```text
-同一时间只允许一个 active GPTAction 翻译 job
+同一时间只允许一个 active GPTAction translation run
 ```
 
-Action 请求仍显式携带 `job_id`，所有领取和提交都验证 job 归属。
+内部使用 `run_id` 隔离一次 PDF 翻译运行，但 Custom GPT 不需要提交或维护 `run_id`。API 自动查找唯一 active run；`getQueueStatus` 和 `getNextBatch` 可以返回 `run_id` 供显示和日志使用，`submitBatch` 只需要 `request_id`、`claim_token` 和结果。
 
-这样避免多个 PDF 的请求混合，也为后续多任务扩展保留协议字段。
+run 生命周期：
+
+```text
+Gradio/CLI 启动一次使用 GPTActionTranslator 的翻译
+→ 主进程创建 run_id，并设为唯一 active run
+→ 翻译子进程产生的所有 request 绑定该 run_id
+→ 正常完成后 run = COMPLETED
+→ 用户明确取消后 run = CANCELED，未完成 request = CANCELED
+→ 子进程异常退出后 run = FAILED，但未明确取消的 request 结果仍可提交并缓存
+→ 下一次翻译创建新的 run_id，并按 fingerprint 复用历史 COMPLETED 结果
+```
+
+CLI 顺序处理多个 PDF 时，每个 PDF 创建独立 run；前一个 run 结束后才能激活下一个。第一版不允许两个 active run。
 
 ---
 
@@ -321,6 +368,40 @@ Action 请求仍显式携带 `job_id`，所有领取和提交都验证 job 归�
 ```text
 pdf2zh_next/gptaction_api.py
 ```
+
+第一版采用独立 sidecar，不挂载到 Gradio：
+
+```text
+Gradio UI:
+  127.0.0.1:7860
+
+GPT Actions API:
+  127.0.0.1:8000
+
+反向代理/隧道：
+  只公开 /v1/actions/*
+```
+
+新增命令入口：
+
+```text
+pdf2zh-action-api
+```
+
+sidecar 与 Gradio/CLI 翻译子进程通过同一个 SQLite 文件通信，不共享 Python 内存。最小配置：
+
+```text
+GPT_ACTION_API_KEY
+GPT_ACTION_QUEUE_DB
+GPT_ACTION_API_HOST=127.0.0.1
+GPT_ACTION_API_PORT=8000
+```
+
+`GPT_ACTION_QUEUE_DB` 必须在主进程启动时解析为规范化绝对路径，并通过配置/环境传递给翻译子进程和 sidecar。两边启动时都打印同一个绝对路径和数据库 schema version；路径不一致时 fail-fast。
+
+认证只使用一个 Bearer API key。不实现多用户认证、OAuth、RBAC、租户隔离、多个 key 或审计平台。
+
+sidecar 可以单独启动，也可以由后续统一 launcher 同时启动 Gradio 与 API；第一版必须先提供可独立运行、可诊断的 `pdf2zh-action-api`，不能依赖 Gradio 内部 ASGI 挂载行为。
 
 公开接口第一版只需要：
 
@@ -338,16 +419,16 @@ GPT 不操作 PDF 文件、工作目录、终端或构建命令。
 
 ```json
 {
-  "job_id": "job_xxx",
+  "run_id": "run_xxx",
   "status": "TRANSLATING",
   "pending": 12,
   "claimed": 8,
   "completed": 300,
-  "failed": 0,
-  "worker_alive": true,
-  "worker_pid": 1234
+  "worker_alive": true
 }
 ```
+
+`run_id` 仅用于显示和日志，GPT 不需要在后续调用中回传。`worker_pid` 只写本地日志，不暴露给 GPT。
 
 ### 7.2 getNextBatch
 
@@ -355,7 +436,7 @@ GPT 不操作 PDF 文件、工作目录、终端或构建命令。
 
 ```json
 {
-  "job_id": "job_xxx",
+  "run_id": "run_xxx",
   "requests": [
     {
       "request_id": "req_1",
@@ -375,6 +456,8 @@ GPT 不操作 PDF 文件、工作目录、终端或构建命令。
 
 外层聚合只组合请求，不修改内部 prompt。
 
+`getNextBatch` 只领取唯一 `ACTIVE` run 绑定的请求。`FAILED` 或 `CANCELED` run 的未完成请求不会继续分发，避免在没有 worker 等待时制造新翻译；但已经领取的旧请求仍可通过 `submitBatch` 按下述规则提交。
+
 边界由以下两项共同控制：
 
 ```text
@@ -388,7 +471,6 @@ max_serialized_response_chars
 
 ```json
 {
-  "job_id": "job_xxx",
   "results": [
     {
       "request_id": "req_1",
@@ -402,13 +484,14 @@ max_serialized_response_chars
 API 层只验证：
 
 ```text
-job_id
 request_id
 claim_token
 当前状态
 非空输出
 单项和总响应大小
 ```
+
+API 根据 `request_id` 找到内部 run。只要 request 未被明确标记为 `CANCELED`，即使原 run 已经 `FAILED`、claim 已过期，也允许 first-result-wins 提交；GPT 不负责维护 run 生命周期。
 
 BabelDOC 内部 JSON ID、placeholder、长度和 fallback 规则继续由官方 BabelDOC 验证。
 
@@ -425,7 +508,7 @@ BabelDOC 内部 JSON ID、placeholder、长度和 fallback 规则继续由官方
 
 ## 8. 多 GPT 会话并行
 
-多个 Custom GPT 会话并行消费同一个 job：
+多个 Custom GPT 会话并行消费同一个 active run：
 
 ```text
 BabelDOC 官方线程池并发产生请求
@@ -495,7 +578,7 @@ def health_check(self) -> None:
 
 ---
 
-## 10. 取消与 stale request 回收
+## 10. 取消与请求回收
 
 原始 PDFMathTranslate-next 已在翻译子进程中使用 cancel message 和强制 terminate/kill。
 
@@ -513,7 +596,7 @@ if hasattr(translator, "bind_cancel_event"):
 ```python
 while True:
     if cancel_event.is_set():
-        mark_request_abandoned(request_id)
+        cancel_incomplete_request(request_id)
         raise TranslationCancelled()
 
     result = queue.load_completed_result(request_id)
@@ -523,15 +606,27 @@ while True:
     cancel_event.wait(0.5)
 ```
 
-worker 被强制终止时，启动恢复逻辑按 `worker_run_id` 和 heartbeat 回收：
+第一版不实现 heartbeat、ABANDONED 状态或基于 worker PID 的请求状态机。原始父进程已经知道翻译子进程是正常完成、用户取消还是异常退出。
+
+处理规则：
 
 ```text
-PENDING → CANCELED/ABANDONED
-CLAIMED → claim 到期后回收
-COMPLETED → 保留，供下次相同 fingerprint 复用
+正常完成：
+  保留 COMPLETED 结果作为 durable cache
+
+用户明确取消：
+  当前 run 标记 CANCELED
+  该 run 中未完成的 PENDING/CLAIMED 请求标记 CANCELED
+  后续提交拒绝
+
+子进程异常退出：
+  当前 run 标记 FAILED
+  不主动取消未完成请求
+  FAILED run 不再分发新 claim
+  GPT 已完成的旧 claim 仍可按 first-result-wins 提交并保存为 COMPLETED
 ```
 
-GPT 对死亡 worker 的旧 claim 提交时，后端必须明确返回 stale/abandoned，而不是静默接受到无人等待的请求。
+异常退出后接受的 COMPLETED 结果可能暂时没有线程等待，但会在下一次运行遇到相同 fingerprint 时直接复用。这是个人版恢复机制的一部分，不应当把有价值的译文作为 stale 丢弃。
 
 ---
 
@@ -545,7 +640,9 @@ worker 崩溃后重新运行：
 从 part 1 重新执行原始 BabelDOC pipeline
 → 相同翻译输入查询 durable queue fingerprint
 → 已完成请求直接复用
-→ 未完成请求重新进入队列
+→ 未完成历史请求按 fingerprint 重新绑定到新的 ACTIVE run
+→ 保留原 request_id 和稳定 claim_token
+→ 原 claim 仍可提交；claim 过期后也可由新会话重新领取
 → 继续原始 split/merge 流程
 ```
 
@@ -740,8 +837,9 @@ Document IL
 2. fingerprint；
 3. enqueue/wait/result reuse；
 4. durable claim；
-5. stale claim 回收；
-6. 单 active job 限制。
+5. claim 过期后重新领取；
+6. first-result-wins 提交；
+7. 单 active run 限制。
 
 ### Phase 2：Translator 接入
 
@@ -754,20 +852,23 @@ Document IL
 
 ### Phase 3：Actions API
 
-1. Bearer 认证；
-2. getQueueStatus；
-3. getNextBatch；
-4. submitBatch；
-5. 完整响应大小限制；
-6. 部分提交和幂等冲突。
+1. 独立 `pdf2zh-action-api` sidecar；
+2. 规范化绝对 queue DB 路径；
+3. 单 Bearer 认证；
+4. getQueueStatus；
+5. getNextBatch；
+6. submitBatch；
+7. 完整响应大小限制；
+8. 部分提交和幂等冲突。
 
 ### Phase 4：取消和恢复
 
 1. cancel event 绑定；
-2. worker_run_id；
-3. stale request 回收；
-4. worker 重启结果复用；
-5. 不实现 IL/part checkpoint。
+2. run 状态与父进程退出结果绑定；
+3. 明确取消时批量标记 CANCELED；
+4. 异常退出后保留未完成请求和 completed 结果；
+5. worker 重启结果复用；
+6. 不实现 heartbeat 或 IL/part checkpoint。
 
 ### Phase 5：Web 与文档
 
@@ -798,8 +899,10 @@ mode-aware fingerprint 不串用结果
 多个 GPT 会话领取不同请求
 claim_token 必须匹配
 claim 过期可重新领取
+过期 claim 的第一个有效结果仍可提交
 相同提交幂等
 不同结果冲突
+明确 CANCELED 请求拒绝提交
 部分提交不回滚合法项
 ```
 
@@ -807,8 +910,9 @@ claim 过期可重新领取
 
 ```text
 取消期间阻塞 translator 及时退出
-死亡 worker 的请求被标记或回收
-旧 claim 提交返回 stale
+明确取消的未完成请求变为 CANCELED
+异常退出不依赖 heartbeat
+异常退出后的旧 claim 仍可 first-result-wins 提交
 completed 结果在重新运行时复用
 worker 崩溃不需要 IL checkpoint
 ```
@@ -825,7 +929,7 @@ split/merge 行为不改变
 mono/dual 输出正常
 ```
 
-### 17.5 大 PDF
+### 17.5 自动集成测试
 
 至少测试：
 
@@ -834,8 +938,22 @@ mono/dual 输出正常
 5 页公式/图片
 50 页单 part
 100 页两 part
-938 页真实 PDF，max_pages_per_part=50
 ```
+
+自动测试还应使用模拟 2～4 个消费者覆盖 claim、乱序提交、取消和结果复用。
+
+### 17.6 手工性能/稳定性验收
+
+首个可用版本完成后，人工运行：
+
+```text
+938 页真实 PDF
+max_pages_per_part=50
+pool_max_workers=6～8
+2～4 个 GPT 会话
+```
+
+该项目不进入每次 PR/CI 的常规必跑测试。
 
 记录：
 
@@ -860,16 +978,19 @@ part 切换耗时
 2. 仓库中没有复制或修改 BabelDOC 源码；
 3. 原始 `async_translate()`、pages、split/merge、排版和输出路径保持不变；
 4. 多个 GPT 会话可以并行领取不同请求；
-5. 请求 claim 持久化到 SQLite，服务重启后状态可恢复；
-6. LLM_BATCH 和 SIMPLE_TEXT 使用不同 fingerprint；
-7. 健康检查不会生成等待中的 Hello 请求；
-8. 自动术语提取第一版明确禁用；
-9. 取消后不留下永久 PENDING/CLAIMED 请求；
-10. worker 崩溃后已完成结果可复用；
-11. 不生成 prepared.il.xml 或自定义 Document checkpoint；
-12. 大 PDF 可使用官方 max_pages_per_part 限制峰值内存；
-13. Docker 不会升级到 BabelDOC 0.6.x；
-14. PDF 正确性仍由原始 BabelDOC 流程保证。
+5. 请求 claim 持久化到 SQLite，claim 过期后可重新领取；
+6. 过期 claim 仍按 first-result-wins 接受第一个有效结果；
+7. Custom GPT 不需要提交或维护 run_id；
+8. 独立 `pdf2zh-action-api` sidecar 与翻译子进程使用同一个规范化绝对 queue DB 路径；
+9. LLM_BATCH 和 SIMPLE_TEXT 使用 canonical、排除运行参数的 fingerprint；
+10. 健康检查不会生成等待中的 Hello 请求；
+11. 自动术语提取第一版明确禁用；
+12. 明确取消后未完成请求全部变为 CANCELED；
+13. worker 异常退出不依赖 heartbeat，旧 claim 结果仍可保存并复用；
+14. 不生成 prepared.il.xml 或自定义 Document checkpoint；
+15. 大 PDF 可使用官方 max_pages_per_part 限制峰值内存；
+16. Docker 不会升级到 BabelDOC 0.6.x；
+17. PDF 正确性仍由原始 BabelDOC 流程保证。
 
 ---
 
