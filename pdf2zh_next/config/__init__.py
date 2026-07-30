@@ -15,6 +15,7 @@ from pdf2zh_next.config.translate_engine_model import DeepSeekSettings
 from pdf2zh_next.config.translate_engine_model import DifySettings
 from pdf2zh_next.config.translate_engine_model import GeminiSettings
 from pdf2zh_next.config.translate_engine_model import GoogleSettings
+from pdf2zh_next.config.translate_engine_model import GPTActionSettings
 from pdf2zh_next.config.translate_engine_model import GrokSettings
 from pdf2zh_next.config.translate_engine_model import GroqSettings
 from pdf2zh_next.config.translate_engine_model import ModelScopeSettings
@@ -35,6 +36,7 @@ __all__ = [
     "WatermarkOutputMode",
     "BingSettings",
     "GoogleSettings",
+    "GPTActionSettings",
     "OpenAISettings",
     "DeepLSettings",
     "OllamaSettings",

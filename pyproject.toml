@@ -33,9 +33,10 @@ dependencies = [
     "gradio-pdf>=0.0.21",
     "peewee>=3.17.8",
     "fontTools",
-    "babeldoc>=0.5.20,<0.6.0",
+    "babeldoc==0.5.24",
     "rich",
     "pydantic-settings>=2.8.1",
+    "python-dotenv>=1.0.1",
     "pydantic>=2.10.6",
     "httpx>=0.28.1",
     "sse-starlette>=2.3.3",
@@ -74,6 +75,8 @@ build-backend = "hatchling.build"
 pdf2zh = "pdf2zh_next.main:cli"
 pdf2zh2 = "pdf2zh_next.main:cli"
 pdf2zh_next = "pdf2zh_next.main:cli"
+pdf2zh-action-api = "pdf2zh_next.gptaction_api:main"
+pdf2zh-action-queue = "pdf2zh_next.gptaction_queue_cli:main"
 
 [tool.flake8]
 ignore = ["E203", "E261", "E501", "W503", "E741"]

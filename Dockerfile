@@ -1,9 +1,9 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
 
-EXPOSE 7860
+EXPOSE 7860 8000
 
 ENV PYTHONUNBUFFERED=1
 
@@ -22,11 +22,8 @@ COPY pyproject.toml .
 RUN uv pip install --system --no-cache -r pyproject.toml && babeldoc --version && babeldoc --warmup
 
 COPY . .
-
-# Calls for a random number to break the cahing of babeldoc upgrade
-# (https://stackoverflow.com/questions/35134713/disable-cache-for-specific-run-commands/58801213#58801213)
-ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
-
-RUN uv pip install --system --no-cache . && uv pip install --system --no-cache --compile-bytecode -U babeldoc "pymupdf<1.25.3" && babeldoc --version && babeldoc --warmup
+RUN uv pip install --system --no-cache . && \
+    uv pip install --system --no-cache --compile-bytecode "babeldoc==0.5.24" "pymupdf<1.25.3" && \
+    babeldoc --version && babeldoc --warmup
 RUN pdf2zh --version
 CMD ["pdf2zh", "--gui"]

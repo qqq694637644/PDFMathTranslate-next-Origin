@@ -69,8 +69,7 @@ def _create_translator_instance(
                     translator.pdf2zh_next_recommended_pool_max_workers
                 )
 
-            # Health check: perform a short translation ignoring cache to validate translator availability
-            translator.translate("Hello", ignore_cache=True)
+            translator.health_check()
             return translator, recommended_qps, recommended_pool_max_workers
 
     raise ValueError("No translator found")

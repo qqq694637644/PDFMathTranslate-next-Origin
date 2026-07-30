@@ -7,6 +7,7 @@ from pdf2zh_next.config import DeepSeekSettings
 from pdf2zh_next.config import DifySettings
 from pdf2zh_next.config import GeminiSettings
 from pdf2zh_next.config import GoogleSettings
+from pdf2zh_next.config import GPTActionSettings
 from pdf2zh_next.config import GrokSettings
 from pdf2zh_next.config import GroqSettings
 from pdf2zh_next.config import ModelScopeSettings
@@ -42,6 +43,7 @@ __all__ = [
     "OpenAISettings",
     "BingSettings",
     "GoogleSettings",
+    "GPTActionSettings",
     "DeepLSettings",
     "DeepSeekSettings",
     "OllamaSettings",

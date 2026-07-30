@@ -286,14 +286,21 @@ class SettingsModel(BaseModel):
         main_engine_type = self.translate_engine_settings.translate_engine_type
         main_metadata = TRANSLATION_ENGINE_METADATA_MAP.get(main_engine_type)
 
+        if main_engine_type == "GPTAction":
+            self.translation.no_auto_extract_glossary = True
+            self.term_extraction_engine_settings = None
+            log.info(
+                "Automatic glossary extraction is disabled for GPTAction translator"
+            )
+
         if self.term_extraction_engine_settings is not None:
             term_engine_type = (
                 self.term_extraction_engine_settings.translate_engine_type
             )
             term_metadata = TRANSLATION_ENGINE_METADATA_MAP.get(term_engine_type)
-            if not term_metadata or not term_metadata.support_llm:
+            if not term_metadata or not term_metadata.support_term_extraction:
                 raise ValueError(
-                    f"Term extraction engine {term_engine_type} must support LLM"
+                    f"Term extraction engine {term_engine_type} is not supported"
                 )
             # Validate and transform term extraction engine if necessary
             if hasattr(self.term_extraction_engine_settings, "validate_settings"):
@@ -311,7 +318,7 @@ class SettingsModel(BaseModel):
                     self.term_extraction_engine_settings.validate_settings()
         else:
             # Default behavior: follow main engine if it supports LLM, otherwise disable auto term extraction
-            if main_metadata and main_metadata.support_llm:
+            if main_metadata and main_metadata.support_term_extraction:
                 self.term_extraction_engine_settings = self.translate_engine_settings
             else:
                 self.term_extraction_engine_settings = None
