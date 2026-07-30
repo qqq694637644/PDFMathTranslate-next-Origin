@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 import shlex
 import typing
@@ -926,16 +925,7 @@ class GPTActionSettings(BaseModel):
     def validate_settings(self) -> None:
         from pdf2zh_next.translator.gptaction_queue import resolve_queue_db_path
 
-        configured_path = resolve_queue_db_path(self.gptaction_queue_db)
-        environment_path = os.getenv("GPT_ACTION_QUEUE_DB")
-        if self.gptaction_queue_db and environment_path:
-            resolved_environment_path = resolve_queue_db_path(environment_path)
-            if configured_path != resolved_environment_path:
-                raise ValueError(
-                    "GPT Action queue path mismatch: --gptaction-queue-db and "
-                    "GPT_ACTION_QUEUE_DB must resolve to the same absolute path"
-                )
-        self.gptaction_queue_db = str(configured_path)
+        self.gptaction_queue_db = str(resolve_queue_db_path(self.gptaction_queue_db))
         self.gptaction_protocol_version = _clean_string(self.gptaction_protocol_version)
         if not self.gptaction_protocol_version:
             raise ValueError("GPT Action protocol version is required")
@@ -956,19 +946,6 @@ class GPTActionSettings(BaseModel):
             raise ValueError(
                 "GPT Action max serialized response chars must be at least 1000"
             )
-        environment_limit_text = os.getenv("GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS")
-        if environment_limit_text:
-            try:
-                environment_limit = int(environment_limit_text)
-            except ValueError as exc:
-                raise ValueError(
-                    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS must be an integer"
-                ) from exc
-            if environment_limit < 1000:
-                raise ValueError(
-                    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS must be at least 1000"
-                )
-            configured_limit = environment_limit
         self.gptaction_max_serialized_response_chars = str(configured_limit)
 
 

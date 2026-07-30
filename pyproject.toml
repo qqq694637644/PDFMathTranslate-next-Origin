@@ -36,6 +36,7 @@ dependencies = [
     "babeldoc==0.5.24",
     "rich",
     "pydantic-settings>=2.8.1",
+    "python-dotenv>=1.0.1",
     "pydantic>=2.10.6",
     "httpx>=0.28.1",
     "sse-starlette>=2.3.3",

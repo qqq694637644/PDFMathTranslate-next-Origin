@@ -406,21 +406,46 @@ GPT Actions API:
 pdf2zh-action-api
 ```
 
-sidecar 与 Gradio/CLI 翻译子进程通过同一个 SQLite 文件通信，不共享 Python 内存。最小配置：
+sidecar 与 Gradio/CLI 翻译子进程通过同一个 SQLite 文件通信，不共享 Python 内存。根目录提供 `.env.example`，用户复制为 `.env` 后统一配置：
 
 ```text
 GPT_ACTION_API_KEY
 GPT_ACTION_QUEUE_DB
 GPT_ACTION_API_HOST=127.0.0.1
 GPT_ACTION_API_PORT=8000
+GPT_ACTION_CLAIM_TTL_SECONDS=1800
+GPT_ACTION_MAX_REQUESTS=8
 GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS=30000
+GPT_ACTION_MAX_SUBMIT_CHARS=60000
+GPT_ACTION_MAX_OUTPUT_CHARS=30000
+GPT_ACTION_PROTOCOL_VERSION=1
+GPT_ACTION_POLL_INTERVAL_SECONDS=0.5
+PDF2ZH_POOL_MAX_WORKERS=8
+PDF2ZH_MAX_PAGES_PER_PART=50
 ```
 
-`GPT_ACTION_QUEUE_DB` 必须在主进程启动时解析为规范化绝对路径，并通过配置/环境传递给翻译子进程和 sidecar。两边启动时都打印同一个绝对路径和数据库 schema version；路径不一致时 fail-fast。
+统一配置优先级：
+
+```text
+显式命令行参数
+> 系统环境变量
+> 根目录 .env
+> 代码默认值
+```
+
+主程序原有 TOML 配置仍可保留，但环境层级覆盖其中同名值。`GPT_ACTION_QUEUE_DB` 必须在主进程和 sidecar 中解析为规范化绝对路径；相对路径以当前项目根目录为基准。
 
 认证只使用一个 Bearer API key。不实现多用户认证、OAuth、RBAC、租户隔离、多个 key 或审计平台。
 
 sidecar 可以单独启动，也可以由后续统一 launcher 同时启动 Gradio 与 API；第一版必须先提供可独立运行、可诊断的 `pdf2zh-action-api`，不能依赖 Gradio 内部 ASGI 挂载行为。
+
+OpenAPI 导出命令：
+
+```text
+python script/export_gptaction_openapi.py
+```
+
+默认读取 `PUBLIC_BASE_URL`，按相同优先级生成 `openapi/gpt-actions.openapi.json`。显式 `--server-url` 覆盖系统环境和 `.env`。
 
 公开接口第一版只需要：
 

@@ -5,9 +5,23 @@ import json
 import sys
 from pathlib import Path
 
+from pydantic_settings import BaseSettings
+from pydantic_settings import SettingsConfigDict
+
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueueError
 from pdf2zh_next.translator.gptaction_queue import resolve_queue_db_path
+
+
+class GPTActionQueueCLISettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="GPT_ACTION_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    queue_db: str | None = None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -76,7 +90,9 @@ def _recover_active_run(queue: GPTActionQueue, *, assume_yes: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    queue_path: Path = resolve_queue_db_path(args.queue_db)
+    explicit_values = {"queue_db": args.queue_db} if args.queue_db is not None else {}
+    settings = GPTActionQueueCLISettings(**explicit_values)
+    queue_path: Path = resolve_queue_db_path(settings.queue_db)
     queue = GPTActionQueue(queue_path)
 
     try:

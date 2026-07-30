@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from pdf2zh_next.gptaction_queue_cli import GPTActionQueueCLISettings
 from pdf2zh_next.gptaction_queue_cli import main
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
 
@@ -55,3 +56,18 @@ def test_status_command_outputs_run_active_not_worker_alive(capsys, tmp_path) ->
     payload = json.loads(capsys.readouterr().out)
     assert payload["run_active"] is True
     assert "worker_alive" not in payload
+
+
+def test_queue_cli_settings_priority(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GPT_ACTION_QUEUE_DB=./data/dotenv.sqlite3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GPT_ACTION_QUEUE_DB", "./data/system.sqlite3")
+
+    from_environment = GPTActionQueueCLISettings()
+    explicit = GPTActionQueueCLISettings(queue_db="./data/explicit.sqlite3")
+
+    assert from_environment.queue_db == "./data/system.sqlite3"
+    assert explicit.queue_db == "./data/explicit.sqlite3"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hmac
 import logging
 from typing import Literal
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 class GPTActionAPISettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GPT_ACTION_",
+        env_file=".env",
+        env_file_encoding="utf-8",
         extra="ignore",
         validate_default=True,
     )
@@ -267,9 +270,30 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
     return app
 
 
-def main() -> None:
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pdf2zh-action-api",
+        description="Run the personal GPT Actions translation sidecar.",
+    )
+    parser.add_argument("--api-key")
+    parser.add_argument("--queue-db")
+    parser.add_argument("--api-host")
+    parser.add_argument("--api-port", type=int)
+    parser.add_argument("--claim-ttl-seconds", type=int)
+    parser.add_argument("--max-requests", type=int)
+    parser.add_argument("--max-serialized-response-chars", type=int)
+    parser.add_argument("--max-submit-chars", type=int)
+    parser.add_argument("--max-output-chars", type=int)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO)
-    settings = GPTActionAPISettings()
+    args = build_cli_parser().parse_args(argv)
+    explicit_values = {
+        key: value for key, value in vars(args).items() if value is not None
+    }
+    settings = GPTActionAPISettings(**explicit_values)
     logger.info(
         "Starting GPT Actions API on %s:%s; queue=%s; schema=%s",
         settings.api_host,

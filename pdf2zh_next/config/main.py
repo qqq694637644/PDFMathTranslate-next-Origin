@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import typing
+from collections.abc import Mapping
 from inspect import getdoc
 from pathlib import Path
 from types import NoneType
@@ -16,6 +17,7 @@ from typing import get_args
 from typing import get_origin
 
 import tomlkit
+from dotenv import dotenv_values
 from pydantic import BaseModel
 
 from pdf2zh_next.config.cli_env_model import CLIEnvSettingsModel
@@ -38,6 +40,16 @@ _term_translation_engine_flag_names = [
 ]
 
 log = logging.getLogger(__name__)
+
+ROOT_DOTENV_FILE = Path(".env")
+_GPT_ACTION_ENV_ALIASES = {
+    "GPT_ACTION_QUEUE_DB": "PDF2ZH_GPTACTION_QUEUE_DB",
+    "GPT_ACTION_PROTOCOL_VERSION": "PDF2ZH_GPTACTION_PROTOCOL_VERSION",
+    "GPT_ACTION_POLL_INTERVAL_SECONDS": ("PDF2ZH_GPTACTION_POLL_INTERVAL_SECONDS"),
+    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS": (
+        "PDF2ZH_GPTACTION_MAX_SERIALIZED_RESPONSE_CHARS"
+    ),
+}
 
 _no_duplicate_field_name = set()
 _no_duplicate_field_name.add("translate_engine_type")
@@ -308,13 +320,34 @@ class ConfigManager:
         recursion_depth: int = 0,
         settings_model: type[BaseModel] | None = None,
     ) -> dict:
+        env_vars = self._with_gptaction_aliases(os.environ)
         return self.parse_dict_vars(
             dedup_field_name,
             recursion_depth,
             settings_model,
-            os.environ,
+            env_vars,
             prefix="PDF2ZH_",
         )
+
+    def parse_dotenv_vars(self, file_path: Path | None = None) -> dict:
+        """Parse the current project root .env without mutating os.environ."""
+        dotenv_path = file_path or ROOT_DOTENV_FILE
+        values = {
+            key: value
+            for key, value in dotenv_values(dotenv_path).items()
+            if value is not None
+        }
+        return self.parse_dict_vars(
+            dict_vars=self._with_gptaction_aliases(values),
+            prefix="PDF2ZH_",
+        )
+
+    def _with_gptaction_aliases(self, values: Mapping[str, Any]) -> dict:
+        normalized = dict(values)
+        for source_name, target_name in _GPT_ACTION_ENV_ALIASES.items():
+            if source_name in normalized and target_name not in normalized:
+                normalized[target_name] = normalized[source_name]
+        return normalized
 
     def parse_dict_vars(
         self,
@@ -567,8 +600,10 @@ class ConfigManager:
         cli_parsed_args = self.parse_dict_vars(
             dict_vars=cli_args,
         )
-        # Parse environment variables (middle priority)
+        # Parse system environment variables (second priority)
         env_vars = self.parse_env_vars()
+        # Parse project-root .env values (third priority)
+        dotenv_vars = self.parse_dotenv_vars()
         # Read default configuration file (lower priority)
         default_config_file = self._read_toml_file(self._default_config_file_path)
 
@@ -583,6 +618,7 @@ class ConfigManager:
             [
                 cli_parsed_args,
                 env_vars,
+                dotenv_vars,
             ]
         )
         config_from_file_dicts = []

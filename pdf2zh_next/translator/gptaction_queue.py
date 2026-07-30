@@ -179,6 +179,14 @@ class GPTActionQueue:
         return connection
 
     @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
     def _write_transaction(self) -> Iterator[sqlite3.Connection]:
         connection = self._connect()
         try:
@@ -192,7 +200,7 @@ class GPTActionQueue:
             connection.close()
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.executescript(
@@ -269,11 +277,11 @@ class GPTActionQueue:
             raise GPTActionQueueError(
                 f"GPT Action queue database does not exist: {self.database_path}"
             )
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             connection.execute("SELECT 1").fetchone()
 
     def verify_schema(self) -> None:
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT version FROM schema_info WHERE singleton = 1"
             ).fetchone()
@@ -309,14 +317,14 @@ class GPTActionQueue:
         return run_id
 
     def get_active_run_id(self) -> str | None:
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT run_id FROM translation_runs WHERE status = 'ACTIVE'"
             ).fetchone()
         return None if row is None else str(row["run_id"])
 
     def get_active_run_summary(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             run = connection.execute(
                 """
                 SELECT run_id, created_at, updated_at
@@ -396,7 +404,7 @@ class GPTActionQueue:
         }
 
     def assert_active_run(self, run_id: str) -> None:
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT status FROM translation_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
@@ -620,7 +628,7 @@ class GPTActionQueue:
                     self.cancel_run(run_id)
                 raise QueueWaitCanceledError("GPT Action translation was canceled")
 
-            with self._connect() as connection:
+            with self._read_connection() as connection:
                 row = connection.execute(
                     """
                     SELECT request.status, request.output_text,
@@ -796,7 +804,7 @@ class GPTActionQueue:
             return SubmissionResult(request_id=request_id, status="COMPLETED")
 
     def queue_status(self) -> dict[str, Any]:
-        with self._connect() as connection:
+        with self._read_connection() as connection:
             run = connection.execute(
                 """
                 SELECT run_id, status

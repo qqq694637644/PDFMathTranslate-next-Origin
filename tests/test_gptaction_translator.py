@@ -150,16 +150,6 @@ def test_gptaction_is_not_available_for_term_extraction(tmp_path) -> None:
     assert settings.term_extraction_engine_settings is None
 
 
-def test_explicit_queue_path_must_match_environment(monkeypatch, tmp_path) -> None:
-    explicit_path = tmp_path / "explicit.sqlite3"
-    environment_path = tmp_path / "environment.sqlite3"
-    monkeypatch.setenv("GPT_ACTION_QUEUE_DB", str(environment_path))
-    settings = GPTActionSettings(gptaction_queue_db=str(explicit_path))
-
-    with pytest.raises(ValueError, match="queue path mismatch"):
-        settings.validate_settings()
-
-
 def test_active_run_id_survives_spawn_serialization(tmp_path) -> None:
     queue_path = tmp_path / "queue.sqlite3"
     run_id = GPTActionQueue(queue_path).start_run()
@@ -170,17 +160,6 @@ def test_active_run_id_survives_spawn_serialization(tmp_path) -> None:
     restored = pickle.loads(pickle.dumps(settings))  # noqa: S301 - trusted test object
 
     assert restored.translate_engine_settings._gptaction_run_id == run_id
-
-
-def test_response_size_environment_is_shared_with_translator(
-    monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setenv("GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS", "45000")
-    settings = GPTActionSettings(gptaction_queue_db=str(tmp_path / "queue.sqlite3"))
-
-    settings.validate_settings()
-
-    assert settings.gptaction_max_serialized_response_chars == "45000"
 
 
 def test_translator_rejects_oversized_request_before_waiting(tmp_path) -> None:

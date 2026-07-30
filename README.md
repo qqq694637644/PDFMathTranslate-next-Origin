@@ -81,6 +81,8 @@ You can try our application out using either of the following services:
 3. [Using **Commandline**](https://pdf2zh-next.com/getting-started/USAGE_commandline.html)
 4. [Using a personal **Custom GPT Actions translator**](./docs/zh/GPT_ACTION_TRANSLATOR.md)
 
+For the GPT Actions translator, copy `.env.example` to the repository-root `.env`, update the public URL and API key, then run `python script/export_gptaction_openapi.py`.
+
 For different use cases, we provide distinct methods to use our program. Check out [this page](./getting-started/getting-started.md) for more information.
 
 <h2 id="usage">Advanced Options</h2>

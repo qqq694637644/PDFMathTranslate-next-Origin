@@ -75,6 +75,128 @@ class TestConfigManager:
         assert env_settings["translation"]["qps"] == 10
         assert "invalid_key" not in env_settings
 
+    def test_parse_root_dotenv_with_gptaction_aliases(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            "\n".join(
+                [
+                    "GPT_ACTION_QUEUE_DB=./data/from-dotenv.sqlite3",
+                    "GPT_ACTION_PROTOCOL_VERSION=dotenv-v1",
+                    "GPT_ACTION_POLL_INTERVAL_SECONDS=1.25",
+                    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS=42000",
+                    "PDF2ZH_POOL_MAX_WORKERS=8",
+                    "PDF2ZH_MAX_PAGES_PER_PART=50",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        parsed = ConfigManager().parse_dotenv_vars()
+
+        assert parsed["translation"]["pool_max_workers"] == 8
+        assert parsed["pdf"]["max_pages_per_part"] == 50
+        assert parsed["gptaction_detail"] == {
+            "gptaction_queue_db": "./data/from-dotenv.sqlite3",
+            "gptaction_protocol_version": "dotenv-v1",
+            "gptaction_poll_interval_seconds": "1.25",
+            "gptaction_max_serialized_response_chars": "42000",
+        }
+
+    def test_cli_system_env_dotenv_priority_for_gptaction(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            "\n".join(
+                [
+                    "GPT_ACTION_QUEUE_DB=./data/dotenv.sqlite3",
+                    "GPT_ACTION_PROTOCOL_VERSION=dotenv",
+                    "GPT_ACTION_POLL_INTERVAL_SECONDS=0.5",
+                    "PDF2ZH_POOL_MAX_WORKERS=6",
+                    "PDF2ZH_MAX_PAGES_PER_PART=50",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GPT_ACTION_QUEUE_DB", "./data/system.sqlite3")
+        monkeypatch.setenv("GPT_ACTION_POLL_INTERVAL_SECONDS", "1.0")
+        monkeypatch.setenv("PDF2ZH_POOL_MAX_WORKERS", "8")
+
+        manager = ConfigManager()
+        cli_values = {
+            "gptaction_detail": {
+                "gptaction_queue_db": "./data/cli.sqlite3",
+                "gptaction_protocol_version": "cli",
+            }
+        }
+        merged = manager.merge_settings(
+            [
+                cli_values,
+                manager.parse_env_vars(),
+                manager.parse_dotenv_vars(),
+            ]
+        )
+
+        assert merged["gptaction_detail"]["gptaction_queue_db"] == (
+            "./data/cli.sqlite3"
+        )
+        assert merged["gptaction_detail"]["gptaction_protocol_version"] == "cli"
+        assert merged["gptaction_detail"]["gptaction_poll_interval_seconds"] == ("1.0")
+        assert merged["translation"]["pool_max_workers"] == 8
+        assert merged["pdf"]["max_pages_per_part"] == 50
+
+    def test_initialize_config_applies_full_gptaction_source_priority(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.chdir(tmp_path)
+        input_pdf = tmp_path / "input.pdf"
+        input_pdf.write_bytes(b"%PDF-1.4\n")
+        (tmp_path / ".env").write_text(
+            "\n".join(
+                [
+                    "GPT_ACTION_QUEUE_DB=./data/dotenv.sqlite3",
+                    "GPT_ACTION_PROTOCOL_VERSION=dotenv",
+                    "GPT_ACTION_POLL_INTERVAL_SECONDS=0.5",
+                    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS=30000",
+                    "PDF2ZH_POOL_MAX_WORKERS=6",
+                    "PDF2ZH_MAX_PAGES_PER_PART=50",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GPT_ACTION_POLL_INTERVAL_SECONDS", "1.0")
+        monkeypatch.setenv("PDF2ZH_POOL_MAX_WORKERS", "8")
+        manager = ConfigManager()
+        manager._default_config_file_path = tmp_path / "missing.toml"
+
+        with patch(
+            "sys.argv",
+            [
+                "pdf2zh_next",
+                "--gptaction",
+                "--gptaction-queue-db",
+                "./data/cli.sqlite3",
+                "--gptaction-protocol-version",
+                "cli",
+                str(input_pdf),
+            ],
+        ):
+            settings = manager.initialize_config()
+
+        settings.validate_settings()
+        assert settings.translate_engine_settings.translate_engine_type == "GPTAction"
+        assert settings.translate_engine_settings.gptaction_queue_db == str(
+            (tmp_path / "data/cli.sqlite3").resolve()
+        )
+        assert settings.translate_engine_settings.gptaction_protocol_version == "cli"
+        assert (
+            settings.translate_engine_settings.gptaction_poll_interval_seconds == "1.0"
+        )
+        assert settings.translation.pool_max_workers == 8
+        assert settings.pdf.max_pages_per_part == 50
+
     def test_convert_env_value(self):
         """Test environment variable value conversion"""
         cm = ConfigManager()

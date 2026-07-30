@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from pdf2zh_next.gptaction_api import GPTActionAPISettings
 from pdf2zh_next.gptaction_api import create_app
+from pdf2zh_next.gptaction_api import main
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
 
 API_KEY = "personal-test-api-key-123456"
@@ -203,3 +204,58 @@ def test_get_next_batch_reports_required_size_for_existing_request(tmp_path) -> 
     detail = response.json()["detail"]
     assert "required_chars=" in detail
     assert "max_chars=1000" in detail
+
+
+def test_api_settings_priority_explicit_env_dotenv_defaults(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "GPT_ACTION_API_KEY=dotenv-api-key-123456789",
+                "GPT_ACTION_QUEUE_DB=./data/dotenv.sqlite3",
+                "GPT_ACTION_API_PORT=8100",
+                "GPT_ACTION_MAX_REQUESTS=4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GPT_ACTION_API_PORT", "8200")
+    monkeypatch.setenv("GPT_ACTION_MAX_REQUESTS", "6")
+
+    settings = GPTActionAPISettings(api_port=8300)
+
+    assert settings.api_key == "dotenv-api-key-123456789"
+    assert settings.api_port == 8300
+    assert settings.max_requests == 6
+    assert settings.queue_db == str((tmp_path / "data/dotenv.sqlite3").resolve())
+    assert settings.api_host == "127.0.0.1"
+
+
+def test_api_cli_overrides_system_env_and_dotenv(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "GPT_ACTION_API_KEY=dotenv-api-key-123456789",
+                "GPT_ACTION_API_PORT=8100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GPT_ACTION_API_PORT", "8200")
+    captured = {}
+
+    def fake_run(app, **kwargs):
+        captured["settings"] = app.state.settings
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr("pdf2zh_next.gptaction_api.uvicorn.run", fake_run)
+
+    main(["--api-port", "8300", "--api-host", "127.0.0.2"])
+
+    assert captured["settings"].api_port == 8300
+    assert captured["settings"].api_host == "127.0.0.2"
+    assert captured["kwargs"]["port"] == 8300
+    assert captured["kwargs"]["host"] == "127.0.0.2"

@@ -26,29 +26,39 @@ Custom GPT Actions ← HTTPS 反向代理 ← pdf2zh-action-api
 pip install -e .
 ```
 
-## 2. 设置共享队列和 API key
+## 2. 创建根目录 `.env`
 
-API 进程与 PDF 翻译进程必须使用同一个绝对 SQLite 路径。
+在仓库根目录复制示例文件：
+
+```bash
+cp .env.example .env
+```
 
 PowerShell：
 
 ```powershell
-$env:GPT_ACTION_API_KEY = "请替换为至少16字符的随机密钥"
-$env:GPT_ACTION_QUEUE_DB = "$HOME\.config\pdf2zh\gptaction-queue.sqlite3"
-$env:GPT_ACTION_API_HOST = "127.0.0.1"
-$env:GPT_ACTION_API_PORT = "8000"
-$env:GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS = "30000"
+Copy-Item .env.example .env
 ```
 
-Linux/macOS：
+至少需要修改：
 
-```bash
-export GPT_ACTION_API_KEY='请替换为至少16字符的随机密钥'
-export GPT_ACTION_QUEUE_DB="$HOME/.config/pdf2zh/gptaction-queue.sqlite3"
-export GPT_ACTION_API_HOST='127.0.0.1'
-export GPT_ACTION_API_PORT='8000'
-export GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS='30000'
+```text
+PUBLIC_BASE_URL
+GPT_ACTION_API_KEY
 ```
+
+API sidecar、PDF 翻译进程、队列恢复命令和 OpenAPI 导出都会从当前项目根目录的 `.env` 读取配置。`GPT_ACTION_QUEUE_DB` 的相对路径以启动命令时的当前目录为基准，并会规范化为绝对路径。
+
+统一配置优先级：
+
+```text
+显式命令行参数
+> 系统环境变量
+> 根目录 .env
+> 代码默认值
+```
+
+主程序原有 TOML 配置仍可使用，但上述环境配置会覆盖其中的同名值。
 
 默认参数适合个人使用：
 
@@ -66,6 +76,15 @@ Action 提交序列化上限:     60000 字符
 pdf2zh-action-api
 ```
 
+也可以显式覆盖 `.env` 或系统环境：
+
+```bash
+pdf2zh-action-api \
+  --api-host 127.0.0.1 \
+  --api-port 8000 \
+  --queue-db ./data/gptaction-queue.sqlite3
+```
+
 启动日志会显示监听地址、队列绝对路径和 schema 版本。sidecar 只提供三个翻译操作：
 
 ```text
@@ -78,8 +97,29 @@ submitBatch
 
 ## 4. 配置 Custom GPT
 
+先根据 `.env` 中的 `PUBLIC_BASE_URL` 生成 schema：
+
+```bash
+python script/export_gptaction_openapi.py
+```
+
+默认输出：
+
+```text
+openapi/gpt-actions.openapi.json
+```
+
+命令行 `--server-url` 的优先级高于系统环境和 `.env`：
+
+```bash
+python script/export_gptaction_openapi.py \
+  --server-url https://translate.example.com
+```
+
+然后：
+
 1. 在 Custom GPT 的 Actions 中导入 `openapi/gpt-actions.openapi.json`。
-2. 把 schema 中的 `servers[0].url` 替换为你的 HTTPS 地址。
+2. 确认 `servers[0].url` 与实际 HTTPS 地址一致。
 3. 认证选择 API key，Bearer 方式，值与 `GPT_ACTION_API_KEY` 相同。
 4. 将根目录 `CUSTOM_GPT_ACTIONS_INSTRUCTIONS.zh-CN.md` 的内容加入 GPT 指令。
 5. 不要让 GPT 上传、下载、解析或排版 PDF；它只领取并提交文本翻译。
@@ -90,22 +130,26 @@ submitBatch
 
 ```bash
 pdf2zh_next document.pdf \
-  --gptaction \
-  --gptaction-queue-db "$GPT_ACTION_QUEUE_DB" \
-  --pool-max-workers 8 \
-  --max-pages-per-part 50 \
-  --no-auto-extract-glossary
+  --gptaction
 ```
 
 Windows PowerShell：
 
 ```powershell
 pdf2zh_next document.pdf `
-  --gptaction `
-  --gptaction-queue-db $env:GPT_ACTION_QUEUE_DB `
-  --pool-max-workers 8 `
-  --max-pages-per-part 50 `
-  --no-auto-extract-glossary
+  --gptaction
+```
+
+此时队列路径、协议版本、轮询间隔、线程数和分片页数来自 `.env`。需要临时覆盖时继续使用原有参数：
+
+```bash
+pdf2zh_next document.pdf \
+  --gptaction \
+  --gptaction-queue-db ./data/other.sqlite3 \
+  --gptaction-protocol-version 2 \
+  --gptaction-poll-interval-seconds 1.0 \
+  --pool-max-workers 12 \
+  --max-pages-per-part 100
 ```
 
 推荐从以下设置开始：

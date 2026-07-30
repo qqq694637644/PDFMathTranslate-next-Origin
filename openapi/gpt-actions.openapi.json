@@ -429,8 +429,8 @@
   },
   "servers": [
     {
-      "url": "https://example.com",
-      "description": "Replace with the public HTTPS endpoint of pdf2zh-action-api"
+      "url": "https://translate.example.com",
+      "description": "Public HTTPS endpoint of pdf2zh-action-api"
     }
   ]
 }
