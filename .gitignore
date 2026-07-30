@@ -174,3 +174,6 @@ uv.lock
 *.pdf
 *.docx
 CLAUDE.md
+
+# Generated Custom GPT Actions schema
+openapi/gpt-actions.openapi.json

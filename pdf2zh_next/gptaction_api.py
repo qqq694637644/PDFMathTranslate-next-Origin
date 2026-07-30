@@ -119,7 +119,7 @@ class QueueStatusResponse(StrictModel):
 
 
 class NextBatchRequest(StrictModel):
-    max_requests: int | None = Field(default=None, ge=1, le=32)
+    max_requests: int = Field(default=0, ge=0, le=32)
 
 
 class ActionRequestItem(StrictModel):
@@ -234,8 +234,8 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
         dependencies=[Depends(require_bearer)],
         openapi_extra={"x-openai-isConsequential": False},
     )
-    def get_next_batch(payload: NextBatchRequest | None = None) -> dict:
-        requested = payload.max_requests if payload else None
+    def get_next_batch(payload: NextBatchRequest) -> dict:
+        requested = payload.max_requests or None
         maximum = min(
             requested or resolved_settings.max_requests, resolved_settings.max_requests
         )

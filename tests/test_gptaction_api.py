@@ -136,6 +136,24 @@ def test_openapi_exposes_only_three_action_operations(tmp_path) -> None:
         schema["paths"]["/v1/actions/batches/next"]["post"]["x-openai-isConsequential"]
         is False
     )
+    next_body_schema = schema["paths"]["/v1/actions/batches/next"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]
+    assert next_body_schema == {"$ref": "#/components/schemas/NextBatchRequest"}
+    assert schema["components"]["schemas"]["NextBatchRequest"] == {
+        "additionalProperties": False,
+        "properties": {
+            "max_requests": {
+                "default": 0,
+                "maximum": 32,
+                "minimum": 0,
+                "title": "Max Requests",
+                "type": "integer",
+            }
+        },
+        "title": "NextBatchRequest",
+        "type": "object",
+    }
     assert (
         schema["paths"]["/v1/actions/batches/submit"]["post"][
             "x-openai-isConsequential"

@@ -18,6 +18,10 @@ def read_output_max_length(path: Path) -> int:
     ]
 
 
+def read_schema(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_export_reads_public_base_url_from_root_dotenv(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
@@ -78,6 +82,35 @@ def test_export_uses_code_default_without_env(monkeypatch, tmp_path) -> None:
 
     assert read_server_url(output) == "https://translate.example.com"
     assert read_output_max_length(output) == 30000
+
+
+def test_exported_get_next_batch_request_body_is_object_schema(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "openapi/gpt-actions.openapi.json"
+
+    export_openapi(output=output)
+
+    payload = read_schema(output)
+    next_body_schema = payload["paths"]["/v1/actions/batches/next"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]
+    assert next_body_schema == {"$ref": "#/components/schemas/NextBatchRequest"}
+    assert payload["components"]["schemas"]["NextBatchRequest"] == {
+        "additionalProperties": False,
+        "properties": {
+            "max_requests": {
+                "default": 0,
+                "maximum": 32,
+                "minimum": 0,
+                "title": "Max Requests",
+                "type": "integer",
+            }
+        },
+        "title": "NextBatchRequest",
+        "type": "object",
+    }
 
 
 def test_export_uses_pdf2zh_env_file_from_other_directory(
