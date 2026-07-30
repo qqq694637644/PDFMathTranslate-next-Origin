@@ -259,9 +259,9 @@
             "type": "integer",
             "title": "Completed"
           },
-          "worker_alive": {
+          "run_active": {
             "type": "boolean",
-            "title": "Worker Alive"
+            "title": "Run Active"
           }
         },
         "additionalProperties": false,
@@ -272,7 +272,7 @@
           "pending",
           "claimed",
           "completed",
-          "worker_alive"
+          "run_active"
         ],
         "title": "QueueStatusResponse"
       },

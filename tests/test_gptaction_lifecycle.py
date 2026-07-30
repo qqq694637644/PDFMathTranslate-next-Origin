@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from pdf2zh_next import high_level
 from pdf2zh_next.config.model import SettingsModel
@@ -14,6 +15,15 @@ def build_settings(tmp_path) -> tuple[SettingsModel, GPTActionQueue]:
         translate_engine_settings=GPTActionSettings(gptaction_queue_db=str(queue_path))
     )
     return settings, GPTActionQueue(queue_path)
+
+
+def test_gptaction_subprocess_has_no_progress_idle_timeout(tmp_path) -> None:
+    settings, _ = build_settings(tmp_path)
+    assert high_level._subprocess_progress_timeout(settings) is None
+    non_gptaction_settings = SimpleNamespace(
+        translate_engine_settings=SimpleNamespace(translate_engine_type="Google")
+    )
+    assert high_level._subprocess_progress_timeout(non_gptaction_settings) == 30 * 60
 
 
 def test_finish_event_marks_run_completed(monkeypatch, tmp_path) -> None:

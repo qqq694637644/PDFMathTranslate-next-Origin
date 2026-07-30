@@ -100,7 +100,7 @@ class QueueStatusResponse(StrictModel):
     pending: int
     claimed: int
     completed: int
-    worker_alive: bool
+    run_active: bool
 
 
 class NextBatchRequest(StrictModel):
@@ -205,7 +205,7 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
             )
         except QueueItemTooLargeError as exc:
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail=str(exc),
             ) from exc
 
@@ -229,7 +229,7 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
             ) from exc
         if body_chars > resolved_settings.max_submit_chars:
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail=(
                     "Serialized submit request exceeds limit: "
                     f"{body_chars} > {resolved_settings.max_submit_chars}"

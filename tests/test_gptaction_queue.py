@@ -9,6 +9,7 @@ from datetime import timezone
 import pytest
 from pdf2zh_next.translator.gptaction_queue import ActiveRunExistsError
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
+from pdf2zh_next.translator.gptaction_queue import QueueItemTooLargeError
 from pdf2zh_next.translator.gptaction_queue import canonical_fingerprint
 
 
@@ -199,3 +200,109 @@ def test_concurrent_claimers_receive_distinct_requests(tmp_path) -> None:
 
     assert all(not thread.is_alive() for thread in threads)
     assert len(set(claimed_ids)) == 2
+
+
+def test_oversized_request_is_rejected_before_insertion(tmp_path) -> None:
+    queue = GPTActionQueue(tmp_path / "queue.sqlite3")
+    run_id = queue.start_run()
+
+    with pytest.raises(QueueItemTooLargeError) as raised:
+        queue.enqueue(
+            run_id=run_id,
+            protocol_version="1",
+            mode="SIMPLE_TEXT",
+            lang_in="en",
+            lang_out="zh",
+            input_text="x" * 2000,
+            semantic_context={},
+            max_serialized_response_chars=1000,
+        )
+
+    assert raised.value.required_chars > raised.value.max_chars
+    assert "required_chars=" in str(raised.value)
+    status = queue.queue_status()
+    assert status["pending"] == 0
+    assert status["claimed"] == 0
+
+
+def test_existing_request_reports_required_size_and_can_be_retried(tmp_path) -> None:
+    queue = GPTActionQueue(tmp_path / "queue.sqlite3")
+    run_id = queue.start_run()
+    queued = queue.enqueue(
+        run_id=run_id,
+        protocol_version="1",
+        mode="SIMPLE_TEXT",
+        lang_in="en",
+        lang_out="zh",
+        input_text="x" * 2000,
+        semantic_context={},
+        max_serialized_response_chars=5000,
+    )
+
+    with pytest.raises(QueueItemTooLargeError) as raised:
+        queue.claim_batch(
+            max_requests=1,
+            max_serialized_response_chars=1000,
+            claim_ttl_seconds=900,
+        )
+
+    assert raised.value.request_id == queued.request_id
+    assert raised.value.required_chars > 1000
+    claimed = queue.claim_batch(
+        max_requests=1,
+        max_serialized_response_chars=raised.value.required_chars,
+        claim_ttl_seconds=900,
+    )
+    assert claimed["requests"][0]["request_id"] == queued.request_id
+
+
+def test_recover_active_run_preserves_completed_and_releases_claims(tmp_path) -> None:
+    queue = GPTActionQueue(tmp_path / "queue.sqlite3")
+    run_id = queue.start_run()
+    first = enqueue(queue, run_id, "Completed")
+    second = enqueue(queue, run_id, "Open")
+    claimed = queue.claim_batch(
+        max_requests=2,
+        max_serialized_response_chars=30000,
+        claim_ttl_seconds=900,
+    )["requests"]
+    queue.submit_result(
+        request_id=claimed[0]["request_id"],
+        claim_token=claimed[0]["claim_token"],
+        output_text="已完成",
+    )
+
+    summary = queue.get_active_run_summary()
+    assert summary is not None
+    assert summary["run_id"] == run_id
+    recovered = queue.recover_active_run(run_id)
+    assert recovered == {
+        "pending": 0,
+        "released_claimed": 1,
+        "completed": 1,
+    }
+    assert queue.get_active_run_id() is None
+    assert queue.queue_status()["status"] == "FAILED"
+
+    with sqlite3.connect(queue.database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        completed_row = connection.execute(
+            "SELECT status, output_text FROM translation_requests WHERE request_id = ?",
+            (first.request_id,),
+        ).fetchone()
+        open_row = connection.execute(
+            "SELECT status, claimed_until FROM translation_requests WHERE request_id = ?",
+            (second.request_id,),
+        ).fetchone()
+    assert dict(completed_row) == {"status": "COMPLETED", "output_text": "已完成"}
+    assert dict(open_row) == {"status": "PENDING", "claimed_until": None}
+
+    next_run = queue.start_run()
+    rebound = enqueue(queue, next_run, "Open")
+    assert rebound.request_id == second.request_id
+    next_claim = queue.claim_batch(
+        max_requests=1,
+        max_serialized_response_chars=30000,
+        claim_ttl_seconds=900,
+    )["requests"][0]
+    assert next_claim["request_id"] == second.request_id

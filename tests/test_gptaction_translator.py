@@ -9,6 +9,7 @@ from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.config.translate_engine_model import TERM_EXTRACTION_ENGINE_METADATA
 from pdf2zh_next.config.translate_engine_model import GPTActionSettings
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
+from pdf2zh_next.translator.gptaction_queue import QueueItemTooLargeError
 from pdf2zh_next.translator.translator_impl.gptaction import (
     GPTActionTranslationCanceledError,
 )
@@ -169,3 +170,34 @@ def test_active_run_id_survives_spawn_serialization(tmp_path) -> None:
     restored = pickle.loads(pickle.dumps(settings))  # noqa: S301 - trusted test object
 
     assert restored.translate_engine_settings._gptaction_run_id == run_id
+
+
+def test_response_size_environment_is_shared_with_translator(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS", "45000")
+    settings = GPTActionSettings(gptaction_queue_db=str(tmp_path / "queue.sqlite3"))
+
+    settings.validate_settings()
+
+    assert settings.gptaction_max_serialized_response_chars == "45000"
+
+
+def test_translator_rejects_oversized_request_before_waiting(tmp_path) -> None:
+    queue_path = tmp_path / "queue.sqlite3"
+    queue = GPTActionQueue(queue_path)
+    run_id = queue.start_run()
+    engine = GPTActionSettings(
+        gptaction_queue_db=str(queue_path),
+        gptaction_max_serialized_response_chars="1000",
+    )
+    engine._gptaction_run_id = run_id
+    translator = GPTActionTranslator(
+        SettingsModel(translate_engine_settings=engine),
+        None,
+    )
+
+    with pytest.raises(QueueItemTooLargeError):
+        translator.translate("x" * 2000)
+
+    assert queue.queue_status()["pending"] == 0

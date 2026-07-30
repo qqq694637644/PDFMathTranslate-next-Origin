@@ -129,6 +129,16 @@ def _start_gptaction_run(
     return queue, run_id
 
 
+def _subprocess_progress_timeout(settings: SettingsModel) -> float | None:
+    translator_settings = settings.translate_engine_settings
+    if (
+        translator_settings is not None
+        and translator_settings.translate_engine_type == "GPTAction"
+    ):
+        return None
+    return 30 * 60
+
+
 def _translate_wrapper(
     settings: SettingsModel,
     file: Path,
@@ -343,8 +353,7 @@ async def _translate_in_subprocess(
     settings: SettingsModel,
     file: Path,
 ):
-    # 30 minutes timeout
-    cb = asynchronize.AsyncCallback(timeout=30 * 60)
+    cb = asynchronize.AsyncCallback(timeout=_subprocess_progress_timeout(settings))
 
     (pipe_progress_recv, pipe_progress_send) = multiprocessing.Pipe(duplex=False)
     (pipe_cancel_message_recv, pipe_cancel_message_send) = multiprocessing.Pipe(

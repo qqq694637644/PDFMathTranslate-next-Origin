@@ -23,13 +23,13 @@ Official BabelDOC: 0.5.24
 不自建 placeholder 注入和 PDF 构建流程
 ```
 
-生产环境固定使用官方 BabelDOC 0.5.24。源码依赖范围可以继续保留：
+源码依赖和生产环境都固定使用官方 BabelDOC 0.5.24：
 
 ```toml
-babeldoc>=0.5.20,<0.6.0
+babeldoc==0.5.24
 ```
 
-但 Docker、发布锁文件或 constraints 必须固定经过验证的官方版本，不能再执行裸 `-U babeldoc`。
+普通 `pip install -e .`、Docker 和发布环境必须解析到同一官方版本，不能再执行裸 `-U babeldoc`。
 
 ---
 
@@ -359,6 +359,24 @@ Gradio/CLI 启动一次使用 GPTActionTranslator 的翻译
 
 CLI 顺序处理多个 PDF 时，每个 PDF 创建独立 run；前一个 run 结束后才能激活下一个。第一版不允许两个 active run。
 
+主进程被任务管理器强杀、终端直接关闭、断电或系统重启时，无法依赖 `finally` 更新 SQLite。个人版不增加 heartbeat，而是提供本地显式恢复入口：
+
+```text
+pdf2zh-action-queue status
+pdf2zh-action-queue recover-active-run
+```
+
+用户确认原进程已经不存在并输入当前 `run_id` 后：
+
+```text
+ACTIVE run → FAILED
+COMPLETED 请求保持不变
+CLAIMED 请求释放为 PENDING，保留稳定 claim_token
+下一次运行按 fingerprint 重新绑定
+```
+
+该入口只操作本机 SQLite，不通过 GPT Actions 暴露。
+
 ---
 
 ## 7. Actions API
@@ -395,6 +413,7 @@ GPT_ACTION_API_KEY
 GPT_ACTION_QUEUE_DB
 GPT_ACTION_API_HOST=127.0.0.1
 GPT_ACTION_API_PORT=8000
+GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS=30000
 ```
 
 `GPT_ACTION_QUEUE_DB` 必须在主进程启动时解析为规范化绝对路径，并通过配置/环境传递给翻译子进程和 sidecar。两边启动时都打印同一个绝对路径和数据库 schema version；路径不一致时 fail-fast。
@@ -424,11 +443,11 @@ GPT 不操作 PDF 文件、工作目录、终端或构建命令。
   "pending": 12,
   "claimed": 8,
   "completed": 300,
-  "worker_alive": true
+  "run_active": true
 }
 ```
 
-`run_id` 仅用于显示和日志，GPT 不需要在后续调用中回传。`worker_pid` 只写本地日志，不暴露给 GPT。
+`run_id` 仅用于显示和日志，GPT 不需要在后续调用中回传。`run_active` 只表示 SQLite 中 run 状态为 `ACTIVE`，不声称检测到真实进程存活。`worker_pid` 不暴露给 GPT。
 
 ### 7.2 getNextBatch
 
@@ -466,6 +485,17 @@ max_serialized_response_chars
 ```
 
 必须按完整 JSON 序列化后的响应大小校验，不能只统计 input 长度。
+
+`GPTActionTranslator` 在请求写入 SQLite 之前，必须使用实际 `request_id`、稳定 `claim_token`、语言、模式和 input 构造单项完整 Action envelope 进行预检。单项本身超过上限时：
+
+```text
+立即抛出明确错误
+错误包含 required_chars 和 max_chars
+不插入 PENDING 请求
+当前 BabelDOC 调用失败，而不是永久堵塞队首
+```
+
+sidecar 与翻译进程统一读取 `GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS`，避免两边上限不一致。
 
 ### 7.3 submitBatch
 
@@ -628,6 +658,14 @@ while True:
 
 异常退出后接受的 COMPLETED 结果可能暂时没有线程等待，但会在下一次运行遇到相同 fingerprint 时直接复用。这是个人版恢复机制的一部分，不应当把有价值的译文作为 stale 丢弃。
 
+GPTAction 模式是人工消费队列，允许用户长时间暂停。原 `_translate_in_subprocess()` 的 30 分钟进度事件超时只保留给其他翻译器；GPTAction 使用：
+
+```python
+AsyncCallback(timeout=None)
+```
+
+因此“30 分钟没有 paragraph 完成”不会误杀仍在等待 Custom GPT 的正常 worker。明确取消仍通过原 cancel pipe 和 event 完成。
+
 ---
 
 ## 11. 崩溃恢复
@@ -735,17 +773,11 @@ TERM_EXTRACTION
 
 ## 14. 依赖与 Docker
 
-源码保持官方范围：
+源码和生产环境统一固定官方版本：
 
 ```toml
-babeldoc>=0.5.20,<0.6.0
-pymupdf<1.25.3
-```
-
-生产环境固定：
-
-```text
 babeldoc==0.5.24
+pymupdf<1.25.3
 ```
 
 当前 Dockerfile 中的独立命令：
@@ -754,7 +786,7 @@ babeldoc==0.5.24
 -U babeldoc
 ```
 
-必须删除或改为受 constraints 控制的官方精确版本，否则可能绕过 `<0.6.0` 升级到不兼容版本。
+必须删除，否则会绕过项目精确依赖升级到未经验证的版本。
 
 禁止：
 
@@ -787,6 +819,10 @@ pdf2zh_next/translator/gptaction_queue.py
   durable claim
   enqueue / wait / submit / recovery
 
+pdf2zh_next/gptaction_queue_cli.py
+  status
+  recover-active-run
+
 pdf2zh_next/gptaction_api.py
   FastAPI Actions API
   getQueueStatus / getNextBatch / submitBatch
@@ -799,6 +835,7 @@ pdf2zh_next/translator/utils.py
 
 pdf2zh_next/high_level.py
   将子进程 cancel event 绑定到 GPTActionTranslator
+  GPTAction 等待进度不设置空闲超时
 
 Dockerfile / constraints
   固定官方 BabelDOC 0.5.24
@@ -839,7 +876,8 @@ Document IL
 4. durable claim；
 5. claim 过期后重新领取；
 6. first-result-wins 提交；
-7. 单 active run 限制。
+7. 单 active run 限制；
+8. 单项 Action envelope 入队前大小预检。
 
 ### Phase 2：Translator 接入
 
@@ -868,7 +906,9 @@ Document IL
 3. 明确取消时批量标记 CANCELED；
 4. 异常退出后保留未完成请求和 completed 结果；
 5. worker 重启结果复用；
-6. 不实现 heartbeat 或 IL/part checkpoint。
+6. 本地显式恢复孤儿 ACTIVE run；
+7. GPTAction 进度等待不使用 30 分钟空闲超时；
+8. 不实现 heartbeat 或 IL/part checkpoint。
 
 ### Phase 5：Web 与文档
 
@@ -891,6 +931,7 @@ SIMPLE_TEXT 返回纯字符串
 LLM_BATCH 返回原始 BabelDOC JSON 字符串
 health_check 不生成 Hello 请求
 mode-aware fingerprint 不串用结果
+超大单项请求在入队前明确失败且不留下 PENDING 记录
 ```
 
 ### 17.2 并发和 claim
@@ -915,6 +956,9 @@ claim 过期可重新领取
 异常退出后的旧 claim 仍可 first-result-wins 提交
 completed 结果在重新运行时复用
 worker 崩溃不需要 IL checkpoint
+强制关闭后可通过本地命令将孤儿 ACTIVE run 标记 FAILED
+恢复时保留 COMPLETED，释放 CLAIMED 请求
+GPTAction 超过 30 分钟无进度事件不会被误杀
 ```
 
 ### 17.4 原始 BabelDOC 集成
@@ -990,7 +1034,11 @@ part 切换耗时
 14. 不生成 prepared.il.xml 或自定义 Document checkpoint；
 15. 大 PDF 可使用官方 max_pages_per_part 限制峰值内存；
 16. Docker 不会升级到 BabelDOC 0.6.x；
-17. PDF 正确性仍由原始 BabelDOC 流程保证。
+17. 普通 pip 安装同样精确使用 BabelDOC 0.5.24；
+18. 强制关闭后有本地显式恢复孤儿 ACTIVE run 的入口；
+19. GPTAction 等待期间不受固定 30 分钟进度空闲超时影响；
+20. 单项超大请求在入队前失败，不会永久堵塞队列；
+21. PDF 正确性仍由原始 BabelDOC 流程保证。
 
 ---
 

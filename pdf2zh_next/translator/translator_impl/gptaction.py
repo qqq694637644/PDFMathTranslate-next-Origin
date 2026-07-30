@@ -42,6 +42,9 @@ class GPTActionTranslator(BaseTranslator):
         self.poll_interval_seconds = float(
             translator_settings.gptaction_poll_interval_seconds
         )
+        self.max_serialized_response_chars = int(
+            translator_settings.gptaction_max_serialized_response_chars
+        )
         self.queue = GPTActionQueue(translator_settings.gptaction_queue_db)
         self.run_id = getattr(translator_settings, "_gptaction_run_id", None)
         if not self.run_id:
@@ -106,6 +109,7 @@ class GPTActionTranslator(BaseTranslator):
             input_text=text,
             semantic_context=self._semantic_context,
             reuse_completed=not (self.ignore_cache or ignore_cache),
+            max_serialized_response_chars=self.max_serialized_response_chars,
         )
         if result.reused_completed:
             self.translate_cache_call_count += 1

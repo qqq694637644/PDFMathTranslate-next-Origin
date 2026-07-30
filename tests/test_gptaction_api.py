@@ -52,7 +52,7 @@ def test_bearer_auth_and_queue_status(tmp_path) -> None:
         "pending": 1,
         "claimed": 0,
         "completed": 0,
-        "worker_alive": True,
+        "run_active": True,
     }
 
 
@@ -167,3 +167,39 @@ def test_oversized_item_does_not_rollback_valid_result(tmp_path) -> None:
     assert results[0]["status"] == "COMPLETED"
     assert results[1]["status"] == "ERROR"
     assert "per-item limit" in results[1]["error"]
+
+
+def test_get_next_batch_reports_required_size_for_existing_request(tmp_path) -> None:
+    database_path = tmp_path / "queue.sqlite3"
+    queue = GPTActionQueue(database_path)
+    run_id = queue.start_run()
+    queue.enqueue(
+        run_id=run_id,
+        protocol_version="1",
+        mode="SIMPLE_TEXT",
+        lang_in="en",
+        lang_out="zh",
+        input_text="x" * 2000,
+        semantic_context={},
+        max_serialized_response_chars=5000,
+    )
+    client = TestClient(
+        create_app(
+            GPTActionAPISettings(
+                api_key=API_KEY,
+                queue_db=str(database_path),
+                max_serialized_response_chars=1000,
+            )
+        )
+    )
+
+    response = client.post(
+        "/v1/actions/batches/next",
+        headers=AUTH,
+        json={"max_requests": 1},
+    )
+
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert "required_chars=" in detail
+    assert "max_chars=1000" in detail

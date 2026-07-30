@@ -20,6 +20,7 @@ from pdf2zh_next.const import DEFAULT_CONFIG_DIR
 
 SCHEMA_VERSION = 1
 DEFAULT_QUEUE_DB = DEFAULT_CONFIG_DIR / "gptaction-queue.sqlite3"
+DEFAULT_MAX_SERIALIZED_RESPONSE_CHARS = 30000
 VALID_MODES = {"LLM_BATCH", "SIMPLE_TEXT"}
 RUN_STATUSES = {"ACTIVE", "COMPLETED", "FAILED", "CANCELED"}
 REQUEST_STATUSES = {"PENDING", "CLAIMED", "COMPLETED", "CANCELED"}
@@ -35,6 +36,23 @@ class ActiveRunExistsError(GPTActionQueueError):
 
 class QueueItemTooLargeError(GPTActionQueueError):
     """Raised when one queue item cannot fit in an Action response."""
+
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        required_chars: int,
+        max_chars: int,
+    ):
+        self.request_id = request_id
+        self.required_chars = required_chars
+        self.max_chars = max_chars
+        super().__init__(
+            "GPT Action request cannot fit in one serialized response: "
+            f"request_id={request_id}, required_chars={required_chars}, "
+            f"max_chars={max_chars}. Increase "
+            "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS and restart the run."
+        )
 
 
 class QueueRequestCanceledError(GPTActionQueueError):
@@ -106,6 +124,40 @@ def _to_iso(value: datetime | None = None) -> str:
 
 def _serialized_chars(payload: dict[str, Any]) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _action_request_item(
+    *,
+    request_id: str,
+    claim_token: str,
+    mode: str,
+    lang_in: str,
+    lang_out: str,
+    input_text: str,
+) -> dict[str, str]:
+    return {
+        "request_id": request_id,
+        "claim_token": claim_token,
+        "mode": mode,
+        "lang_in": lang_in,
+        "lang_out": lang_out,
+        "input": input_text,
+    }
+
+
+def _validate_action_request_size(
+    *,
+    run_id: str,
+    item: dict[str, str],
+    max_serialized_response_chars: int,
+) -> None:
+    required_chars = _serialized_chars({"run_id": run_id, "requests": [item]})
+    if required_chars > max_serialized_response_chars:
+        raise QueueItemTooLargeError(
+            request_id=item["request_id"],
+            required_chars=required_chars,
+            max_chars=max_serialized_response_chars,
+        )
 
 
 class GPTActionQueue:
@@ -263,6 +315,86 @@ class GPTActionQueue:
             ).fetchone()
         return None if row is None else str(row["run_id"])
 
+    def get_active_run_summary(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            run = connection.execute(
+                """
+                SELECT run_id, created_at, updated_at
+                FROM translation_runs
+                WHERE status = 'ACTIVE'
+                """
+            ).fetchone()
+            if run is None:
+                return None
+            counts = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM translation_requests
+                    WHERE run_id = ?
+                    GROUP BY status
+                    """,
+                    (run["run_id"],),
+                ).fetchall()
+            }
+        return {
+            "run_id": str(run["run_id"]),
+            "created_at": str(run["created_at"]),
+            "updated_at": str(run["updated_at"]),
+            "pending": counts.get("PENDING", 0),
+            "claimed": counts.get("CLAIMED", 0),
+            "completed": counts.get("COMPLETED", 0),
+        }
+
+    def recover_active_run(self, run_id: str) -> dict[str, int]:
+        """Explicitly fail one orphaned active run and release its open claims."""
+        now = _to_iso()
+        with self._write_transaction() as connection:
+            run = connection.execute(
+                "SELECT status FROM translation_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise GPTActionQueueError(f"GPT Action run does not exist: {run_id}")
+            if run["status"] != "ACTIVE":
+                raise GPTActionQueueError(
+                    f"GPT Action run is not active: {run_id} ({run['status']})"
+                )
+            counts = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM translation_requests
+                    WHERE run_id = ?
+                    GROUP BY status
+                    """,
+                    (run_id,),
+                ).fetchall()
+            }
+            connection.execute(
+                """
+                UPDATE translation_runs
+                SET status = 'FAILED', updated_at = ?, completed_at = ?
+                WHERE run_id = ? AND status = 'ACTIVE'
+                """,
+                (now, now, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE translation_requests
+                SET status = 'PENDING', claimed_until = NULL, updated_at = ?
+                WHERE run_id = ? AND status = 'CLAIMED'
+                """,
+                (now, run_id),
+            )
+        return {
+            "pending": counts.get("PENDING", 0),
+            "released_claimed": counts.get("CLAIMED", 0),
+            "completed": counts.get("COMPLETED", 0),
+        }
+
     def assert_active_run(self, run_id: str) -> None:
         with self._connect() as connection:
             row = connection.execute(
@@ -293,6 +425,14 @@ class GPTActionQueue:
                 WHERE run_id = ? AND status = 'ACTIVE'
                 """,
                 (now, now, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE translation_requests
+                SET status = 'PENDING', claimed_until = NULL, updated_at = ?
+                WHERE run_id = ? AND status = 'CLAIMED'
+                """,
+                (now, run_id),
             )
 
     def cancel_run(self, run_id: str) -> None:
@@ -327,6 +467,7 @@ class GPTActionQueue:
         input_text: str,
         semantic_context: dict[str, Any] | None = None,
         reuse_completed: bool = True,
+        max_serialized_response_chars: int = DEFAULT_MAX_SERIALIZED_RESPONSE_CHARS,
     ) -> EnqueueResult:
         if not input_text:
             raise ValueError("GPT Action translation input cannot be empty")
@@ -366,7 +507,8 @@ class GPTActionQueue:
 
             existing = connection.execute(
                 """
-                SELECT request_id, run_id, status
+                SELECT request_id, run_id, status, claim_token, mode,
+                       lang_in, lang_out, input_text
                 FROM translation_requests
                 WHERE fingerprint = ? AND status IN ('PENDING', 'CLAIMED')
                 LIMIT 1
@@ -375,6 +517,20 @@ class GPTActionQueue:
             ).fetchone()
             if existing is not None:
                 existing_run_id = str(existing["run_id"])
+                claim_token = str(existing["claim_token"] or secrets.token_urlsafe(24))
+                item = _action_request_item(
+                    request_id=str(existing["request_id"]),
+                    claim_token=claim_token,
+                    mode=str(existing["mode"]),
+                    lang_in=str(existing["lang_in"]),
+                    lang_out=str(existing["lang_out"]),
+                    input_text=str(existing["input_text"]),
+                )
+                _validate_action_request_size(
+                    run_id=run_id,
+                    item=item,
+                    max_serialized_response_chars=max_serialized_response_chars,
+                )
                 if existing_run_id != run_id:
                     old_run = connection.execute(
                         "SELECT status FROM translation_runs WHERE run_id = ?",
@@ -387,10 +543,19 @@ class GPTActionQueue:
                     connection.execute(
                         """
                         UPDATE translation_requests
-                        SET run_id = ?, updated_at = ?
+                        SET run_id = ?, claim_token = ?, updated_at = ?
                         WHERE request_id = ?
                         """,
-                        (run_id, now, existing["request_id"]),
+                        (run_id, claim_token, now, existing["request_id"]),
+                    )
+                elif existing["claim_token"] is None:
+                    connection.execute(
+                        """
+                        UPDATE translation_requests
+                        SET claim_token = ?, updated_at = ?
+                        WHERE request_id = ?
+                        """,
+                        (claim_token, now, existing["request_id"]),
                     )
                 return EnqueueResult(
                     request_id=str(existing["request_id"]),
@@ -399,13 +564,27 @@ class GPTActionQueue:
                 )
 
             request_id = f"req_{secrets.token_hex(16)}"
+            claim_token = secrets.token_urlsafe(24)
+            item = _action_request_item(
+                request_id=request_id,
+                claim_token=claim_token,
+                mode=mode,
+                lang_in=lang_in,
+                lang_out=lang_out,
+                input_text=input_text,
+            )
+            _validate_action_request_size(
+                run_id=run_id,
+                item=item,
+                max_serialized_response_chars=max_serialized_response_chars,
+            )
             connection.execute(
                 """
                 INSERT INTO translation_requests(
                     request_id, run_id, protocol_version, mode, fingerprint,
                     lang_in, lang_out, input_text, status, claim_token,
                     claimed_until, output_text, created_at, updated_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', NULL, NULL, NULL, ?, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NULL, NULL, ?, ?, NULL)
                 """,
                 (
                     request_id,
@@ -416,6 +595,7 @@ class GPTActionQueue:
                     lang_in,
                     lang_out,
                     input_text,
+                    claim_token,
                     now,
                     now,
                 ),
@@ -443,9 +623,11 @@ class GPTActionQueue:
             with self._connect() as connection:
                 row = connection.execute(
                     """
-                    SELECT status, output_text
-                    FROM translation_requests
-                    WHERE request_id = ?
+                    SELECT request.status, request.output_text,
+                           run.status AS run_status
+                    FROM translation_requests AS request
+                    JOIN translation_runs AS run ON run.run_id = request.run_id
+                    WHERE request.request_id = ?
                     """,
                     (request_id,),
                 ).fetchone()
@@ -458,6 +640,11 @@ class GPTActionQueue:
             if row["status"] == "CANCELED":
                 raise QueueRequestCanceledError(
                     f"GPT Action request was canceled: {request_id}"
+                )
+            if row["run_status"] != "ACTIVE":
+                raise GPTActionQueueError(
+                    "GPT Action translation run is no longer active: "
+                    f"{row['run_status']}"
                 )
 
             if cancel_event is not None:
@@ -510,21 +697,22 @@ class GPTActionQueue:
             selected_tokens: list[tuple[str, str]] = []
             for row in candidates:
                 token = str(row["claim_token"] or secrets.token_urlsafe(24))
-                item = {
-                    "request_id": str(row["request_id"]),
-                    "claim_token": token,
-                    "mode": str(row["mode"]),
-                    "lang_in": str(row["lang_in"]),
-                    "lang_out": str(row["lang_out"]),
-                    "input": str(row["input_text"]),
-                }
+                item = _action_request_item(
+                    request_id=str(row["request_id"]),
+                    claim_token=token,
+                    mode=str(row["mode"]),
+                    lang_in=str(row["lang_in"]),
+                    lang_out=str(row["lang_out"]),
+                    input_text=str(row["input_text"]),
+                )
                 tentative = {"run_id": run_id, "requests": [*selected, item]}
-                if _serialized_chars(tentative) > max_serialized_response_chars:
+                required_chars = _serialized_chars(tentative)
+                if required_chars > max_serialized_response_chars:
                     if not selected:
                         raise QueueItemTooLargeError(
-                            "The next GPT Action request exceeds the serialized "
-                            f"response limit ({max_serialized_response_chars} chars): "
-                            f"{row['request_id']}"
+                            request_id=str(row["request_id"]),
+                            required_chars=required_chars,
+                            max_chars=max_serialized_response_chars,
                         )
                     break
                 selected.append(item)
@@ -624,7 +812,7 @@ class GPTActionQueue:
                     "pending": 0,
                     "claimed": 0,
                     "completed": 0,
-                    "worker_alive": False,
+                    "run_active": False,
                 }
             counts = {
                 str(row["status"]): int(row["count"])
@@ -645,5 +833,5 @@ class GPTActionQueue:
             "pending": counts.get("PENDING", 0),
             "claimed": counts.get("CLAIMED", 0),
             "completed": counts.get("COMPLETED", 0),
-            "worker_alive": status == "ACTIVE",
+            "run_active": status == "ACTIVE",
         }

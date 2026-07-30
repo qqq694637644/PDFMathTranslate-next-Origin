@@ -917,6 +917,10 @@ class GPTActionSettings(BaseModel):
     gptaction_poll_interval_seconds: str = Field(
         default="0.5", description="Queue polling interval in seconds"
     )
+    gptaction_max_serialized_response_chars: str = Field(
+        default="30000",
+        description="Maximum serialized getNextBatch response size in characters",
+    )
     _gptaction_run_id: str | None = PrivateAttr(default=None)
 
     def validate_settings(self) -> None:
@@ -939,6 +943,33 @@ class GPTActionSettings(BaseModel):
             _clean_string(self.gptaction_poll_interval_seconds),
             field="GPT Action poll interval",
         )
+        configured_limit_text = _clean_string(
+            self.gptaction_max_serialized_response_chars
+        )
+        try:
+            configured_limit = int(configured_limit_text)
+        except ValueError as exc:
+            raise ValueError(
+                "GPT Action max serialized response chars must be an integer"
+            ) from exc
+        if configured_limit < 1000:
+            raise ValueError(
+                "GPT Action max serialized response chars must be at least 1000"
+            )
+        environment_limit_text = os.getenv("GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS")
+        if environment_limit_text:
+            try:
+                environment_limit = int(environment_limit_text)
+            except ValueError as exc:
+                raise ValueError(
+                    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS must be an integer"
+                ) from exc
+            if environment_limit < 1000:
+                raise ValueError(
+                    "GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS must be at least 1000"
+                )
+            configured_limit = environment_limit
+        self.gptaction_max_serialized_response_chars = str(configured_limit)
 
 
 ## Please add the translator configuration class above this location.

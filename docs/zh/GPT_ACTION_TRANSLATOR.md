@@ -20,11 +20,10 @@ Custom GPT Actions ← HTTPS 反向代理 ← pdf2zh-action-api
 
 ## 1. 安装
 
-使用 Python 3.10～3.12 安装本项目。生产环境使用官方 BabelDOC `0.5.24`，不要单独执行不带版本范围的 `pip install -U babeldoc`。
+使用 Python 3.10～3.12 安装本项目。项目依赖已经精确固定官方 BabelDOC `0.5.24`；不要单独执行 `pip install -U babeldoc`。
 
 ```bash
 pip install -e .
-pip install "babeldoc==0.5.24" "pymupdf<1.25.3"
 ```
 
 ## 2. 设置共享队列和 API key
@@ -38,6 +37,7 @@ $env:GPT_ACTION_API_KEY = "请替换为至少16字符的随机密钥"
 $env:GPT_ACTION_QUEUE_DB = "$HOME\.config\pdf2zh\gptaction-queue.sqlite3"
 $env:GPT_ACTION_API_HOST = "127.0.0.1"
 $env:GPT_ACTION_API_PORT = "8000"
+$env:GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS = "30000"
 ```
 
 Linux/macOS：
@@ -47,6 +47,7 @@ export GPT_ACTION_API_KEY='请替换为至少16字符的随机密钥'
 export GPT_ACTION_QUEUE_DB="$HOME/.config/pdf2zh/gptaction-queue.sqlite3"
 export GPT_ACTION_API_HOST='127.0.0.1'
 export GPT_ACTION_API_PORT='8000'
+export GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS='30000'
 ```
 
 默认参数适合个人使用：
@@ -117,6 +118,8 @@ max_pages_per_part = 50
 
 BabelDOC 线程会逐步产生请求。Custom GPT 可以反复调用 `getNextBatch`，翻译后调用 `submitBatch`；请求完成后，对应 BabelDOC 线程继续执行。
 
+GPTAction 模式不会使用原有的 30 分钟“无进度事件”超时。只要进程仍在运行，用户可以暂停领取请求，数小时后继续；当前 PDF 分片和 BabelDOC 内存也会继续驻留。
+
 ## 请求模式
 
 ### `LLM_BATCH`
@@ -138,6 +141,7 @@ API 不复制 BabelDOC 的 JSON、ID、placeholder 或长度校验；这些仍�
 - 已完成请求提交不同结果返回 `CONFLICT`。
 - 一个批次中的合法结果会独立完成，其他错误项不会回滚。
 - 单项 output 超过上限时仅该项返回 `ERROR`。
+- 请求在写入 SQLite 前会按完整单项 Action envelope 预检；如果单项本身超过响应上限，当前 BabelDOC 翻译会立即明确失败，不会留下永久堵塞队首的请求。
 
 ## 取消和恢复
 
@@ -151,6 +155,32 @@ worker 异常退出后，不恢复 Document IL。重新运行官方 pipeline 时
 4. 官方 BabelDOC 继续排版和输出。
 
 这能复用译文，但不保证从失败分片的中间位置继续；已完成分片可能重新解析和排版。
+
+### 强制关闭后的孤儿 ACTIVE run
+
+如果主进程被任务管理器结束、终端被直接关闭、断电或系统重启，SQLite 无法自动执行正常清理。确认原翻译进程已经不存在后，运行：
+
+```bash
+pdf2zh-action-queue status
+pdf2zh-action-queue recover-active-run
+```
+
+恢复命令会显示当前唯一 `ACTIVE` run，并要求输入完整 `run_id` 确认。无人值守脚本可以使用：
+
+```bash
+pdf2zh-action-queue recover-active-run --yes
+```
+
+它只做以下操作：
+
+```text
+ACTIVE run → FAILED
+已完成结果保持 COMPLETED
+已领取但未完成的请求释放为 PENDING
+下一次运行按 fingerprint 重新绑定并复用
+```
+
+不要在原翻译进程仍然运行时执行该命令。
 
 ## 大 PDF 与内存
 
@@ -173,7 +203,17 @@ Custom GPT 使用正确 Bearer key
 
 ### 启动翻译时报已有 active run
 
-正常情况下父进程会在完成、取消或子进程异常时关闭 run。确认没有另一个 PDF 翻译仍在运行；不要同时启动两个 GPTAction PDF 任务。
+正常情况下父进程会在完成、取消或子进程异常时关闭 run。先确认没有另一个 PDF 翻译仍在运行；若上次是强制退出，使用 `pdf2zh-action-queue recover-active-run` 显式恢复。不要同时启动两个 GPTAction PDF 任务。
+
+### 请求提示超过 Action 响应上限
+
+错误会包含 `required_chars` 与 `max_chars`。确认 Custom GPT Actions 能接受更大的响应后，在 sidecar 与 PDF 翻译进程中设置同一个值：
+
+```text
+GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS
+```
+
+然后重新启动翻译。默认值为 `30000`。
 
 ### 为什么自动术语提取被关闭
 
