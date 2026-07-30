@@ -148,6 +148,8 @@ GPT 会话数 = 2～4
 
 根据队列深度、fallback 比例、RSS 和吞吐量再测试 12、16。
 
+`GPTActionTranslator` 不声明会覆盖用户配置的 recommended pool 值。用户通过 CLI、系统环境或 `.env` 设置的 `pool_max_workers` 必须保持生效。
+
 ---
 
 ## 5. GPTActionTranslator
@@ -180,7 +182,7 @@ def do_llm_translate(self, text, rate_limit_params=None):
 
 ### 5.2 SIMPLE_TEXT
 
-实现普通翻译和 LLM batch fallback：
+实现 BabelDOC 普通非 LLM 翻译调用：
 
 ```python
 def do_translate(self, text, rate_limit_params=None):
@@ -188,6 +190,8 @@ def do_translate(self, text, rate_limit_params=None):
 ```
 
 返回纯译文字符串。
+
+注意：BabelDOC 0.5.24 的 `ILTranslatorLLMOnly` 批量校验失败后，通常改为单段 LLM prompt 并再次调用 `llm_translate()`，所以仍会产生 `LLM_BATCH`。不得把 `SIMPLE_TEXT` 描述成官方 LLM-only 路径的固定 fallback。
 
 ### 5.3 队列作为权威缓存
 
@@ -414,7 +418,7 @@ GPT_ACTION_QUEUE_DB
 GPT_ACTION_API_HOST=127.0.0.1
 GPT_ACTION_API_PORT=8000
 GPT_ACTION_CLAIM_TTL_SECONDS=1800
-GPT_ACTION_MAX_REQUESTS=8
+GPT_ACTION_MAX_REQUESTS=2
 GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS=30000
 GPT_ACTION_MAX_SUBMIT_CHARS=60000
 GPT_ACTION_MAX_OUTPUT_CHARS=30000
@@ -433,9 +437,11 @@ PDF2ZH_MAX_PAGES_PER_PART=50
 > 代码默认值
 ```
 
-主程序原有 TOML 配置仍可保留，但环境层级覆盖其中同名值。`GPT_ACTION_QUEUE_DB` 必须在主进程和 sidecar 中解析为规范化绝对路径；相对路径以当前项目根目录为基准。
+主程序原有 TOML 配置仍可保留，但环境层级覆盖其中同名值。默认读取当前工作目录的 `.env`；跨目录启动时使用系统环境变量 `PDF2ZH_ENV_FILE` 指向同一个绝对 `.env`，sidecar、队列 CLI 和 OpenAPI 导出还支持 `--env-file`。`.env` 中的相对 `GPT_ACTION_QUEUE_DB` 必须相对于 `.env` 文件目录解析，并在各入口日志中打印最终绝对路径。
 
 认证只使用一个 Bearer API key。不实现多用户认证、OAuth、RBAC、租户隔离、多个 key 或审计平台。
+
+`.env.example` 的公开占位密钥必须被 validator 明确拒绝，不能只依赖最小长度检查。
 
 sidecar 可以单独启动，也可以由后续统一 launcher 同时启动 Gradio 与 API；第一版必须先提供可独立运行、可诊断的 `pdf2zh-action-api`，不能依赖 Gradio 内部 ASGI 挂载行为。
 
@@ -446,6 +452,14 @@ python script/export_gptaction_openapi.py
 ```
 
 默认读取 `PUBLIC_BASE_URL`，按相同优先级生成 `openapi/gpt-actions.openapi.json`。显式 `--server-url` 覆盖系统环境和 `.env`。
+
+`getNextBatch` 和 `submitBatch` 都是 POST，但属于个人翻译循环中的可重复队列操作，必须显式导出：
+
+```yaml
+x-openai-isConsequential: false
+```
+
+静态 schema 测试必须断言两个字段存在且为 `false`。
 
 公开接口第一版只需要：
 
@@ -509,6 +523,8 @@ max_requests
 max_serialized_response_chars
 ```
 
+默认 `max_requests=2`，配合 `pool_max_workers=8` 给 2～4 个 GPT 会话保留实际并行空间。仍允许调用方传入更小值，但不能超过 sidecar 配置上限。
+
 必须按完整 JSON 序列化后的响应大小校验，不能只统计 input 长度。
 
 `GPTActionTranslator` 在请求写入 SQLite 之前，必须使用实际 `request_id`、稳定 `claim_token`、语言、模式和 input 构造单项完整 Action envelope 进行预检。单项本身超过上限时：
@@ -521,6 +537,14 @@ max_serialized_response_chars
 ```
 
 sidecar 与翻译进程统一读取 `GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS`，避免两边上限不一致。
+
+所有 Actions 字符限制必须满足：
+
+```text
+1000 <= configured limit <= 99999
+```
+
+覆盖 `MAX_SERIALIZED_RESPONSE_CHARS`、`MAX_SUBMIT_CHARS` 和 `MAX_OUTPUT_CHARS`，不允许用户配置平台必然拒绝的 100000 或更大值。
 
 ### 7.3 submitBatch
 
@@ -549,6 +573,14 @@ claim_token
 API 根据 `request_id` 找到内部 run。只要 request 未被明确标记为 `CANCELED`，即使原 run 已经 `FAILED`、claim 已过期，也允许 first-result-wins 提交；GPT 不负责维护 run 生命周期。
 
 BabelDOC 内部 JSON ID、placeholder、长度和 fallback 规则继续由官方 BabelDOC 验证。
+
+队列在 BabelDOC 校验前只能把 GPT 提交结果标记 `COMPLETED`。为处理已知坏结果，个人版提供本地精确清理：
+
+```text
+pdf2zh-action-queue invalidate-request <request_id>
+```
+
+只允许在没有 active run 时删除指定 `COMPLETED` 记录。translator 必须记录 `request_id`、`mode` 和 `fingerprint`，便于从 BabelDOC 错误附近定位缓存项。
 
 建议支持部分提交：
 

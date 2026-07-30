@@ -98,11 +98,40 @@ class TestConfigManager:
         assert parsed["translation"]["pool_max_workers"] == 8
         assert parsed["pdf"]["max_pages_per_part"] == 50
         assert parsed["gptaction_detail"] == {
-            "gptaction_queue_db": "./data/from-dotenv.sqlite3",
+            "gptaction_queue_db": str(
+                (tmp_path / "data/from-dotenv.sqlite3").resolve()
+            ),
             "gptaction_protocol_version": "dotenv-v1",
             "gptaction_poll_interval_seconds": "1.25",
             "gptaction_max_serialized_response_chars": "42000",
         }
+
+    def test_parse_dotenv_uses_pdf2zh_env_file_from_other_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        config_dir = tmp_path / "config"
+        launch_dir = tmp_path / "launch"
+        config_dir.mkdir()
+        launch_dir.mkdir()
+        env_file = config_dir / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "GPT_ACTION_QUEUE_DB=./data/shared.sqlite3",
+                    "PDF2ZH_POOL_MAX_WORKERS=7",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(launch_dir)
+        monkeypatch.setenv("PDF2ZH_ENV_FILE", str(env_file))
+
+        parsed = ConfigManager().parse_dotenv_vars()
+
+        assert parsed["gptaction_detail"]["gptaction_queue_db"] == str(
+            (config_dir / "data/shared.sqlite3").resolve()
+        )
+        assert parsed["translation"]["pool_max_workers"] == 7
 
     def test_cli_system_env_dotenv_priority_for_gptaction(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

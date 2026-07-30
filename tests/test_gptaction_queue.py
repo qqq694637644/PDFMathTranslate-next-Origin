@@ -9,6 +9,7 @@ from datetime import timezone
 import pytest
 from pdf2zh_next.translator.gptaction_queue import ActiveRunExistsError
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
+from pdf2zh_next.translator.gptaction_queue import GPTActionQueueError
 from pdf2zh_next.translator.gptaction_queue import QueueItemTooLargeError
 from pdf2zh_next.translator.gptaction_queue import canonical_fingerprint
 
@@ -81,6 +82,8 @@ def test_single_active_run_and_completed_result_reuse(tmp_path) -> None:
     assert reused.reused_completed is True
     assert reused.output_text == "你好"
     assert reused.request_id is None
+    assert reused.reused_request_id == queued.request_id
+    assert len(reused.fingerprint) == 64
 
 
 def test_expired_claim_reuses_token_and_first_result_wins(tmp_path) -> None:
@@ -306,3 +309,58 @@ def test_recover_active_run_preserves_completed_and_releases_claims(tmp_path) ->
         claim_ttl_seconds=900,
     )["requests"][0]
     assert next_claim["request_id"] == second.request_id
+
+
+def test_character_limit_defense_rejects_100000(tmp_path) -> None:
+    queue = GPTActionQueue(tmp_path / "queue.sqlite3")
+    run_id = queue.start_run()
+
+    with pytest.raises(ValueError, match="between 1000 and 99999"):
+        queue.enqueue(
+            run_id=run_id,
+            protocol_version="1",
+            mode="SIMPLE_TEXT",
+            lang_in="en",
+            lang_out="zh",
+            input_text="Hello",
+            semantic_context={},
+            max_serialized_response_chars=100000,
+        )
+
+    with pytest.raises(ValueError, match="between 1000 and 99999"):
+        queue.claim_batch(
+            max_requests=1,
+            max_serialized_response_chars=100000,
+            claim_ttl_seconds=900,
+        )
+
+
+def test_invalidate_completed_request_prevents_future_reuse(tmp_path) -> None:
+    queue = GPTActionQueue(tmp_path / "queue.sqlite3")
+    run_id = queue.start_run()
+    queued = enqueue(queue, run_id, "Bad cached output")
+    item = queue.claim_batch(
+        max_requests=1,
+        max_serialized_response_chars=30000,
+        claim_ttl_seconds=900,
+    )["requests"][0]
+    queue.submit_result(
+        request_id=item["request_id"],
+        claim_token=item["claim_token"],
+        output_text="INVALID OUTPUT",
+    )
+
+    with pytest.raises(GPTActionQueueError, match="while a GPT Action run is active"):
+        queue.invalidate_completed_request(queued.request_id)
+
+    queue.complete_run(run_id)
+    invalidated = queue.invalidate_completed_request(queued.request_id)
+    assert invalidated["request_id"] == queued.request_id
+    assert invalidated["mode"] == "SIMPLE_TEXT"
+    assert len(invalidated["fingerprint"]) == 64
+    assert queue.get_completed_request(queued.request_id) is None
+
+    next_run = queue.start_run()
+    replacement = enqueue(queue, next_run, "Bad cached output")
+    assert replacement.reused_completed is False
+    assert replacement.request_id != queued.request_id

@@ -923,6 +923,8 @@ class GPTActionSettings(BaseModel):
     _gptaction_run_id: str | None = PrivateAttr(default=None)
 
     def validate_settings(self) -> None:
+        from pdf2zh_next.translator.gptaction_queue import MAX_ACTION_PAYLOAD_CHARS
+        from pdf2zh_next.translator.gptaction_queue import MIN_ACTION_PAYLOAD_CHARS
         from pdf2zh_next.translator.gptaction_queue import resolve_queue_db_path
 
         self.gptaction_queue_db = str(resolve_queue_db_path(self.gptaction_queue_db))
@@ -942,9 +944,10 @@ class GPTActionSettings(BaseModel):
             raise ValueError(
                 "GPT Action max serialized response chars must be an integer"
             ) from exc
-        if configured_limit < 1000:
+        if not MIN_ACTION_PAYLOAD_CHARS <= configured_limit <= MAX_ACTION_PAYLOAD_CHARS:
             raise ValueError(
-                "GPT Action max serialized response chars must be at least 1000"
+                "GPT Action max serialized response chars must be between "
+                "1000 and 99999"
             )
         self.gptaction_max_serialized_response_chars = str(configured_limit)
 

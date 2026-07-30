@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from pdf2zh_next.gptaction_api import GPTActionAPISettings
 from pdf2zh_next.gptaction_api import create_app
+from pdf2zh_next.gptaction_api import load_api_settings
 from pdf2zh_next.gptaction_api import main
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
 
@@ -27,7 +29,7 @@ def build_client(tmp_path):
     settings = GPTActionAPISettings(
         api_key=API_KEY,
         queue_db=str(database_path),
-        max_requests=8,
+        max_requests=2,
         max_serialized_response_chars=30000,
         max_submit_chars=60000,
     )
@@ -121,6 +123,16 @@ def test_openapi_exposes_only_three_action_operations(tmp_path) -> None:
     }
     assert operation_ids == {"getQueueStatus", "getNextBatch", "submitBatch"}
     assert "HTTPBearer" in schema["components"]["securitySchemes"]
+    assert (
+        schema["paths"]["/v1/actions/batches/next"]["post"]["x-openai-isConsequential"]
+        is False
+    )
+    assert (
+        schema["paths"]["/v1/actions/batches/submit"]["post"][
+            "x-openai-isConsequential"
+        ]
+        is False
+    )
 
 
 def test_oversized_item_does_not_rollback_valid_result(tmp_path) -> None:
@@ -128,7 +140,7 @@ def test_oversized_item_does_not_rollback_valid_result(tmp_path) -> None:
     settings = GPTActionAPISettings(
         api_key=API_KEY,
         queue_db=str(database_path),
-        max_requests=8,
+        max_requests=2,
         max_serialized_response_chars=30000,
         max_submit_chars=60000,
         max_output_chars=1000,
@@ -224,7 +236,7 @@ def test_api_settings_priority_explicit_env_dotenv_defaults(
     monkeypatch.setenv("GPT_ACTION_API_PORT", "8200")
     monkeypatch.setenv("GPT_ACTION_MAX_REQUESTS", "6")
 
-    settings = GPTActionAPISettings(api_port=8300)
+    settings = load_api_settings(api_port=8300)
 
     assert settings.api_key == "dotenv-api-key-123456789"
     assert settings.api_port == 8300
@@ -259,3 +271,82 @@ def test_api_cli_overrides_system_env_and_dotenv(monkeypatch, tmp_path) -> None:
     assert captured["settings"].api_host == "127.0.0.2"
     assert captured["kwargs"]["port"] == 8300
     assert captured["kwargs"]["host"] == "127.0.0.2"
+
+
+def test_default_claim_size_allows_four_sessions_to_share_eight_requests(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "queue.sqlite3"
+    settings = GPTActionAPISettings(api_key=API_KEY, queue_db=str(database_path))
+    client = TestClient(create_app(settings))
+    queue = GPTActionQueue(database_path)
+    run_id = queue.start_run()
+    for index in range(8):
+        enqueue(queue, run_id, f"Request {index}")
+
+    batches = [
+        client.post("/v1/actions/batches/next", headers=AUTH, json={}).json()
+        for _ in range(4)
+    ]
+
+    assert [len(batch["requests"]) for batch in batches] == [2, 2, 2, 2]
+    request_ids = {
+        item["request_id"] for batch in batches for item in batch["requests"]
+    }
+    assert len(request_ids) == 8
+
+
+def test_public_example_api_key_is_rejected(tmp_path) -> None:
+    with pytest.raises(ValueError, match="public .env.example placeholder"):
+        GPTActionAPISettings(
+            api_key="replace-with-a-long-random-key",
+            queue_db=str(tmp_path / "queue.sqlite3"),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["max_serialized_response_chars", "max_submit_chars", "max_output_chars"],
+)
+def test_action_character_limits_must_remain_below_100000(field_name, tmp_path) -> None:
+    accepted = GPTActionAPISettings(
+        api_key=API_KEY,
+        queue_db=str(tmp_path / "accepted.sqlite3"),
+        **{field_name: 99999},
+    )
+    assert getattr(accepted, field_name) == 99999
+
+    with pytest.raises(ValueError, match="between 1000 and 99999"):
+        GPTActionAPISettings(
+            api_key=API_KEY,
+            queue_db=str(tmp_path / "rejected.sqlite3"),
+            **{field_name: 100000},
+        )
+
+
+def test_api_settings_use_pdf2zh_env_file_from_other_working_directory(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "config"
+    launch_dir = tmp_path / "launch"
+    config_dir.mkdir()
+    launch_dir.mkdir()
+    env_file = config_dir / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "GPT_ACTION_API_KEY=external-env-file-key-123456",
+                "GPT_ACTION_QUEUE_DB=./data/shared.sqlite3",
+                "GPT_ACTION_MAX_REQUESTS=2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(launch_dir)
+    monkeypatch.setenv("PDF2ZH_ENV_FILE", str(env_file))
+
+    settings = load_api_settings()
+
+    assert settings.api_key == "external-env-file-key-123456"
+    assert settings.max_requests == 2
+    assert settings.queue_db == str((config_dir / "data/shared.sqlite3").resolve())

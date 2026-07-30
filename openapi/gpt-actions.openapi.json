@@ -76,7 +76,8 @@
           {
             "HTTPBearer": []
           }
-        ]
+        ],
+        "x-openai-isConsequential": false
       }
     },
     "/v1/actions/batches/submit": {
@@ -119,7 +120,8 @@
           {
             "HTTPBearer": []
           }
-        ]
+        ],
+        "x-openai-isConsequential": false
       }
     }
   },
@@ -365,7 +367,7 @@
           },
           "output": {
             "type": "string",
-            "maxLength": 30000,
+            "maxLength": 99999,
             "minLength": 1,
             "title": "Output"
           }

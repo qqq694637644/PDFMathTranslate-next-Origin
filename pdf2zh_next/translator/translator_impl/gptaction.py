@@ -26,7 +26,6 @@ class GPTActionTranslator(BaseTranslator):
 
     name = "gptaction"
     model = "custom-gpt-actions"
-    pdf2zh_next_recommended_pool_max_workers = 8
 
     def __init__(
         self,
@@ -111,18 +110,35 @@ class GPTActionTranslator(BaseTranslator):
             reuse_completed=not (self.ignore_cache or ignore_cache),
             max_serialized_response_chars=self.max_serialized_response_chars,
         )
+        effective_request_id = result.request_id or result.reused_request_id
+        logger.info(
+            "GPT Action translation request: request_id=%s mode=%s "
+            "fingerprint=%s reused_completed=%s",
+            effective_request_id,
+            mode,
+            result.fingerprint,
+            result.reused_completed,
+        )
         if result.reused_completed:
             self.translate_cache_call_count += 1
             return str(result.output_text)
         if result.request_id is None:
             raise RuntimeError("GPT Action queue returned no request or cached output")
         try:
-            return self.queue.wait_for_result(
+            output = self.queue.wait_for_result(
                 result.request_id,
                 cancel_event=self._cancel_event,
                 poll_interval_seconds=self.poll_interval_seconds,
                 run_id=self.run_id,
             )
+            logger.info(
+                "GPT Action translation result received: request_id=%s mode=%s "
+                "fingerprint=%s",
+                result.request_id,
+                mode,
+                result.fingerprint,
+            )
+            return output
         except (QueueRequestCanceledError, QueueWaitCanceledError) as exc:
             raise GPTActionTranslationCanceledError(str(exc)) from exc
 

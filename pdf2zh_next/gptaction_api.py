@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import logging
+import os
 from typing import Literal
 
 import uvicorn
@@ -20,19 +21,23 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
+from pdf2zh_next.env_file import pydantic_env_file_kwargs
+from pdf2zh_next.env_file import read_env_file_values
+from pdf2zh_next.env_file import resolve_env_file_path
+from pdf2zh_next.env_file import resolve_path_from_env_file
+from pdf2zh_next.translator.gptaction_queue import MAX_ACTION_PAYLOAD_CHARS
 from pdf2zh_next.translator.gptaction_queue import SCHEMA_VERSION
 from pdf2zh_next.translator.gptaction_queue import GPTActionQueue
 from pdf2zh_next.translator.gptaction_queue import QueueItemTooLargeError
 from pdf2zh_next.translator.gptaction_queue import resolve_queue_db_path
 
 logger = logging.getLogger(__name__)
+FORBIDDEN_EXAMPLE_API_KEYS = {"replace-with-a-long-random-key"}
 
 
 class GPTActionAPISettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GPT_ACTION_",
-        env_file=".env",
-        env_file_encoding="utf-8",
         extra="ignore",
         validate_default=True,
     )
@@ -42,7 +47,7 @@ class GPTActionAPISettings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     claim_ttl_seconds: int = 1800
-    max_requests: int = 8
+    max_requests: int = 2
     max_serialized_response_chars: int = 30000
     max_submit_chars: int = 60000
     max_output_chars: int = 30000
@@ -53,6 +58,10 @@ class GPTActionAPISettings(BaseSettings):
         cleaned = value.strip()
         if len(cleaned) < 16:
             raise ValueError("GPT_ACTION_API_KEY must contain at least 16 characters")
+        if cleaned in FORBIDDEN_EXAMPLE_API_KEYS:
+            raise ValueError(
+                "GPT_ACTION_API_KEY still uses the public .env.example placeholder"
+            )
         return cleaned
 
     @field_validator("queue_db")
@@ -81,15 +90,10 @@ class GPTActionAPISettings(BaseSettings):
     )
     @classmethod
     def validate_size_limits(cls, value: int) -> int:
-        if value < 1000:
-            raise ValueError("GPT Action serialized size limits must be at least 1000")
-        return value
-
-    @field_validator("max_output_chars")
-    @classmethod
-    def validate_output_limit(cls, value: int) -> int:
-        if value > 30000:
-            raise ValueError("max_output_chars cannot exceed 30000")
+        if not 1000 <= value <= MAX_ACTION_PAYLOAD_CHARS:
+            raise ValueError(
+                "GPT Action character limits must be between 1000 and 99999"
+            )
         return value
 
 
@@ -127,7 +131,7 @@ class NextBatchResponse(StrictModel):
 class SubmitResultItem(StrictModel):
     request_id: str = Field(min_length=1, max_length=128)
     claim_token: str = Field(min_length=1, max_length=256)
-    output: str = Field(min_length=1, max_length=30000)
+    output: str = Field(min_length=1, max_length=MAX_ACTION_PAYLOAD_CHARS)
 
 
 class SubmitBatchRequest(StrictModel):
@@ -144,8 +148,36 @@ class SubmitBatchResponse(StrictModel):
     results: list[SubmitItemResponse]
 
 
+def load_api_settings(
+    *,
+    env_file: str | None = None,
+    **explicit_values,
+) -> GPTActionAPISettings:
+    resolved_env_file = resolve_env_file_path(env_file)
+    if explicit_values.get("queue_db") is not None:
+        explicit_values["queue_db"] = str(
+            resolve_queue_db_path(explicit_values["queue_db"])
+        )
+    elif os.getenv("GPT_ACTION_QUEUE_DB"):
+        explicit_values["queue_db"] = str(
+            resolve_queue_db_path(os.environ["GPT_ACTION_QUEUE_DB"])
+        )
+    else:
+        dotenv_queue_db = read_env_file_values(resolved_env_file).get(
+            "GPT_ACTION_QUEUE_DB"
+        )
+        if dotenv_queue_db:
+            explicit_values["queue_db"] = str(
+                resolve_path_from_env_file(dotenv_queue_db, resolved_env_file)
+            )
+    return GPTActionAPISettings(
+        **explicit_values,
+        **pydantic_env_file_kwargs(resolved_env_file),
+    )
+
+
 def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
-    resolved_settings = settings or GPTActionAPISettings()
+    resolved_settings = settings or load_api_settings()
     queue = GPTActionQueue(resolved_settings.queue_db)
     bearer = HTTPBearer(auto_error=False)
     bearer_dependency = Depends(bearer)
@@ -192,6 +224,7 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
         response_model=NextBatchResponse,
         operation_id="getNextBatch",
         dependencies=[Depends(require_bearer)],
+        openapi_extra={"x-openai-isConsequential": False},
     )
     def get_next_batch(payload: NextBatchRequest | None = None) -> dict:
         requested = payload.max_requests if payload else None
@@ -217,6 +250,7 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
         response_model=SubmitBatchResponse,
         operation_id="submitBatch",
         dependencies=[Depends(require_bearer)],
+        openapi_extra={"x-openai-isConsequential": False},
     )
     async def submit_batch(
         request: Request,
@@ -276,6 +310,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         description="Run the personal GPT Actions translation sidecar.",
     )
     parser.add_argument("--api-key")
+    parser.add_argument(
+        "--env-file",
+        help="Shared dotenv path. Overrides PDF2ZH_ENV_FILE and the current .env.",
+    )
     parser.add_argument("--queue-db")
     parser.add_argument("--api-host")
     parser.add_argument("--api-port", type=int)
@@ -290,14 +328,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO)
     args = build_cli_parser().parse_args(argv)
+    env_file = args.env_file
     explicit_values = {
-        key: value for key, value in vars(args).items() if value is not None
+        key: value
+        for key, value in vars(args).items()
+        if key != "env_file" and value is not None
     }
-    settings = GPTActionAPISettings(**explicit_values)
+    settings = load_api_settings(env_file=env_file, **explicit_values)
+    resolved_env_file = resolve_env_file_path(env_file)
     logger.info(
-        "Starting GPT Actions API on %s:%s; queue=%s; schema=%s",
+        "Starting GPT Actions API on %s:%s; env_file=%s; queue=%s; schema=%s",
         settings.api_host,
         settings.api_port,
+        resolved_env_file,
         settings.queue_db,
         SCHEMA_VERSION,
     )

@@ -5,7 +5,7 @@
 ## 工作循环
 
 1. 调用 `getQueueStatus` 查看是否存在 `TRANSLATING` run。
-2. 调用 `getNextBatch` 领取请求。
+2. 调用 `getNextBatch` 并传入 `{"max_requests": 2}` 领取请求。默认每次只领取两个，给其他 GPT 会话保留并行任务。
 3. 逐个翻译 `requests` 中的项目。
 4. 及时调用 `submitBatch` 提交已经完成的项目；允许部分提交，不必等待整个领取批次全部完成。
 5. 重复领取和提交，直到 `getNextBatch` 返回空数组。
@@ -65,4 +65,4 @@ output
 5. 译文适合正式 PDF 排版；
 6. 不添加原文没有的结论或注释。
 
-BabelDOC 会继续检查批量 JSON、ID、placeholder 和长度。格式失败可能触发 `SIMPLE_TEXT` fallback，因此严格遵守原始 prompt 能显著提高效率。
+BabelDOC 会继续检查批量 JSON、ID、placeholder 和长度。`LLM_BATCH` 格式失败后，官方 LLM-only 路径通常会改成单段 LLM prompt 再次调用 `LLM_BATCH`，不保证切换到 `SIMPLE_TEXT`；严格遵守原始 prompt 能显著提高效率。

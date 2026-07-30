@@ -47,7 +47,15 @@ PUBLIC_BASE_URL
 GPT_ACTION_API_KEY
 ```
 
-API sidecar、PDF 翻译进程、队列恢复命令和 OpenAPI 导出都会从当前项目根目录的 `.env` 读取配置。`GPT_ACTION_QUEUE_DB` 的相对路径以启动命令时的当前目录为基准，并会规范化为绝对路径。
+示例值 `replace-with-a-long-random-key` 会被程序明确拒绝，避免忘记换密钥后把公开占位值暴露到公网。
+
+默认情况下，API sidecar、PDF 翻译进程、队列恢复命令和 OpenAPI 导出读取当前工作目录的 `.env`。从不同目录启动命令时，应先设置同一个绝对路径：
+
+```text
+PDF2ZH_ENV_FILE=C:\path\to\PDFMathTranslate-next-Origin\.env
+```
+
+sidecar、队列 CLI 和 OpenAPI 导出也支持显式 `--env-file`。`.env` 中的相对 `GPT_ACTION_QUEUE_DB` 统一相对于该 `.env` 文件所在目录解析，不再相对于各命令的工作目录解析。启动日志会打印实际 `env_file` 和 queue DB 的绝对路径。
 
 统一配置优先级：
 
@@ -64,7 +72,7 @@ API sidecar、PDF 翻译进程、队列恢复命令和 OpenAPI 导出都会从�
 
 ```text
 claim TTL:                 1800 秒
-每次最多领取:              8 个 BabelDOC 请求
+每次最多领取:              2 个 BabelDOC 请求
 Action 响应序列化上限:     30000 字符
 Action 提交序列化上限:     60000 字符
 单项 output 上限:         30000 字符
@@ -92,6 +100,14 @@ getQueueStatus
 getNextBatch
 submitBatch
 ```
+
+两个 POST 操作在 OpenAPI 中都显式包含：
+
+```yaml
+x-openai-isConsequential: false
+```
+
+这样 Custom GPT 可以在用户授权后连续领取和提交，而不是每次调用都要求单独确认。
 
 不要把 Gradio、本机文件或其他管理接口暴露给 Custom GPT。对外反向代理只需要转发 `/v1/actions/*`，并提供有效 HTTPS 地址。
 
@@ -160,6 +176,8 @@ Custom GPT 会话数 = 2～4
 max_pages_per_part = 50
 ```
 
+GPTActionTranslator 不再设置会覆盖用户输入的推荐线程数。显式命令行、系统环境或 `.env` 中的 `pool_max_workers` 会保持生效，不会被静默改回 8。
+
 BabelDOC 线程会逐步产生请求。Custom GPT 可以反复调用 `getNextBatch`，翻译后调用 `submitBatch`；请求完成后，对应 BabelDOC 线程继续执行。
 
 GPTAction 模式不会使用原有的 30 分钟“无进度事件”超时。只要进程仍在运行，用户可以暂停领取请求，数小时后继续；当前 PDF 分片和 BabelDOC 内存也会继续驻留。
@@ -174,11 +192,12 @@ GPTAction 模式不会使用原有的 30 分钟“无进度事件”超时。只
 
 `input` 是单段文本。GPT 只返回译文，必须保留原有 placeholder、公式标记和不可翻译 token。
 
-API 不复制 BabelDOC 的 JSON、ID、placeholder 或长度校验；这些仍由官方 BabelDOC 负责。LLM batch 失败时，BabelDOC 会使用 `SIMPLE_TEXT` fallback。
+API 不复制 BabelDOC 的 JSON、ID、placeholder 或长度校验；这些仍由官方 BabelDOC 负责。`LLM_BATCH` 失败后，BabelDOC 0.5.24 的 LLM-only 路径通常改为单段 LLM prompt 并再次调用 `LLM_BATCH`，而不是固定切换到 `SIMPLE_TEXT`。`SIMPLE_TEXT` 仍用于普通非 LLM 翻译调用。
 
 ## 并行、claim 和幂等
 
 - SQLite 使用原子领取，多个 GPT 会话不会正常领取同一请求。
+- 默认每次最多领取 2 个请求；`pool_max_workers=8` 时，2～4 个 GPT 会话可以分摊当前队列。
 - `claim_token` 在同一请求的重新领取中保持稳定。
 - claim 过期后请求可被重新领取，但先到达的有效结果仍会被接受。
 - 相同结果重复提交返回 `IDEMPOTENT`。
@@ -258,6 +277,32 @@ GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS
 ```
 
 然后重新启动翻译。默认值为 `30000`。
+
+GPT Actions 的请求和响应必须少于 100,000 字符，因此以下三个配置均被硬限制为 `1000～99999`：
+
+```text
+GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS
+GPT_ACTION_MAX_SUBMIT_CHARS
+GPT_ACTION_MAX_OUTPUT_CHARS
+```
+
+### 清除一个已知错误的缓存结果
+
+translator 日志会打印：
+
+```text
+request_id
+mode
+fingerprint
+```
+
+如果 BabelDOC 后续判断某个已提交结果无效，先结束或取消当前 run，再精确删除该缓存：
+
+```bash
+pdf2zh-action-queue invalidate-request req_xxx
+```
+
+命令默认要求输入完整 `request_id` 确认，也支持 `--yes`。删除后，下次相同 fingerprint 会重新进入 GPT Actions 队列。active run 存在时命令会拒绝执行，避免删除仍有线程等待的结果。
 
 ### 为什么自动术语提取被关闭
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import pickle
 import threading
 import time
@@ -14,6 +15,7 @@ from pdf2zh_next.translator.translator_impl.gptaction import (
     GPTActionTranslationCanceledError,
 )
 from pdf2zh_next.translator.translator_impl.gptaction import GPTActionTranslator
+from pdf2zh_next.translator.utils import get_translator
 
 
 def build_translator(tmp_path):
@@ -180,3 +182,57 @@ def test_translator_rejects_oversized_request_before_waiting(tmp_path) -> None:
         translator.translate("x" * 2000)
 
     assert queue.queue_status()["pending"] == 0
+
+
+def test_translator_character_limit_must_remain_below_100000(tmp_path) -> None:
+    settings = GPTActionSettings(
+        gptaction_queue_db=str(tmp_path / "queue.sqlite3"),
+        gptaction_max_serialized_response_chars="100000",
+    )
+
+    with pytest.raises(ValueError, match="between 1000 and 99999"):
+        settings.validate_settings()
+
+
+def test_gptaction_does_not_override_explicit_pool_max_workers(tmp_path) -> None:
+    queue_path = tmp_path / "queue.sqlite3"
+    queue = GPTActionQueue(queue_path)
+    run_id = queue.start_run()
+    engine = GPTActionSettings(gptaction_queue_db=str(queue_path))
+    engine._gptaction_run_id = run_id
+    settings = SettingsModel(translate_engine_settings=engine)
+    settings.translation.pool_max_workers = 6
+
+    get_translator(settings)
+
+    assert settings.translation.pool_max_workers == 6
+
+
+def test_translator_logs_request_id_mode_and_fingerprint(caplog, tmp_path) -> None:
+    queue, _, _, translator = build_translator(tmp_path)
+    result: dict[str, object] = {}
+
+    def translate() -> None:
+        result["output"] = translator.translate("Trace me")
+
+    with caplog.at_level(logging.INFO):
+        thread = threading.Thread(target=translate)
+        thread.start()
+        wait_for_pending(queue)
+        item = queue.claim_batch(
+            max_requests=1,
+            max_serialized_response_chars=30000,
+            claim_ttl_seconds=900,
+        )["requests"][0]
+        queue.submit_result(
+            request_id=item["request_id"],
+            claim_token=item["claim_token"],
+            output_text="跟踪",
+        )
+        thread.join(timeout=5)
+
+    assert result["output"] == "跟踪"
+    combined = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"request_id={item['request_id']}" in combined
+    assert "mode=SIMPLE_TEXT" in combined
+    assert "fingerprint=" in combined

@@ -21,6 +21,8 @@ from pdf2zh_next.const import DEFAULT_CONFIG_DIR
 SCHEMA_VERSION = 1
 DEFAULT_QUEUE_DB = DEFAULT_CONFIG_DIR / "gptaction-queue.sqlite3"
 DEFAULT_MAX_SERIALIZED_RESPONSE_CHARS = 30000
+MIN_ACTION_PAYLOAD_CHARS = 1000
+MAX_ACTION_PAYLOAD_CHARS = 99999
 VALID_MODES = {"LLM_BATCH", "SIMPLE_TEXT"}
 RUN_STATUSES = {"ACTIVE", "COMPLETED", "FAILED", "CANCELED"}
 REQUEST_STATUSES = {"PENDING", "CLAIMED", "COMPLETED", "CANCELED"}
@@ -68,6 +70,8 @@ class EnqueueResult:
     request_id: str | None
     output_text: str | None
     reused_completed: bool
+    fingerprint: str
+    reused_request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,12 @@ def _validate_action_request_size(
     item: dict[str, str],
     max_serialized_response_chars: int,
 ) -> None:
+    if (
+        not MIN_ACTION_PAYLOAD_CHARS
+        <= max_serialized_response_chars
+        <= MAX_ACTION_PAYLOAD_CHARS
+    ):
+        raise ValueError("max_serialized_response_chars must be between 1000 and 99999")
     required_chars = _serialized_chars({"run_id": run_id, "requests": [item]})
     if required_chars > max_serialized_response_chars:
         raise QueueItemTooLargeError(
@@ -498,7 +508,7 @@ class GPTActionQueue:
             if reuse_completed:
                 completed = connection.execute(
                     """
-                    SELECT output_text
+                    SELECT request_id, output_text
                     FROM translation_requests
                     WHERE fingerprint = ? AND status = 'COMPLETED'
                     ORDER BY completed_at DESC
@@ -511,6 +521,8 @@ class GPTActionQueue:
                         request_id=None,
                         output_text=str(completed["output_text"]),
                         reused_completed=True,
+                        fingerprint=fingerprint,
+                        reused_request_id=str(completed["request_id"]),
                     )
 
             existing = connection.execute(
@@ -569,6 +581,7 @@ class GPTActionQueue:
                     request_id=str(existing["request_id"]),
                     output_text=None,
                     reused_completed=False,
+                    fingerprint=fingerprint,
                 )
 
             request_id = f"req_{secrets.token_hex(16)}"
@@ -612,6 +625,7 @@ class GPTActionQueue:
                 request_id=request_id,
                 output_text=None,
                 reused_completed=False,
+                fingerprint=fingerprint,
             )
 
     def wait_for_result(
@@ -667,6 +681,14 @@ class GPTActionQueue:
         max_serialized_response_chars: int,
         claim_ttl_seconds: int,
     ) -> dict[str, Any]:
+        if (
+            not MIN_ACTION_PAYLOAD_CHARS
+            <= max_serialized_response_chars
+            <= MAX_ACTION_PAYLOAD_CHARS
+        ):
+            raise ValueError(
+                "max_serialized_response_chars must be between 1000 and 99999"
+            )
         max_requests = max(1, max_requests)
         now_dt = _utcnow()
         now = _to_iso(now_dt)
@@ -802,6 +824,49 @@ class GPTActionQueue:
                 (output_text, now, now, request_id),
             )
             return SubmissionResult(request_id=request_id, status="COMPLETED")
+
+    def get_completed_request(self, request_id: str) -> dict[str, str] | None:
+        with self._read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT request_id, run_id, mode, fingerprint, completed_at
+                FROM translation_requests
+                WHERE request_id = ? AND status = 'COMPLETED'
+                """,
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {key: str(row[key]) for key in row.keys()}
+
+    def invalidate_completed_request(self, request_id: str) -> dict[str, str]:
+        """Delete one completed cached result when no translation run is active."""
+        with self._write_transaction() as connection:
+            active = connection.execute(
+                "SELECT run_id FROM translation_runs WHERE status = 'ACTIVE'"
+            ).fetchone()
+            if active is not None:
+                raise GPTActionQueueError(
+                    "Cannot invalidate cached output while a GPT Action run is active: "
+                    f"{active['run_id']}"
+                )
+            row = connection.execute(
+                """
+                SELECT request_id, run_id, mode, fingerprint, completed_at
+                FROM translation_requests
+                WHERE request_id = ? AND status = 'COMPLETED'
+                """,
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise GPTActionQueueError(
+                    f"Completed GPT Action request was not found: {request_id}"
+                )
+            connection.execute(
+                "DELETE FROM translation_requests WHERE request_id = ?",
+                (request_id,),
+            )
+        return {key: str(row[key]) for key in row.keys()}
 
     def queue_status(self) -> dict[str, Any]:
         with self._read_connection() as connection:

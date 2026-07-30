@@ -27,6 +27,8 @@ from pdf2zh_next.const import DEFAULT_CONFIG_DIR
 from pdf2zh_next.const import DEFAULT_CONFIG_FILE
 from pdf2zh_next.const import VERSION_DEFAULT_CONFIG_FILE
 from pdf2zh_next.const import WRITE_TEMP_CONFIG_FILE
+from pdf2zh_next.env_file import resolve_env_file_path
+from pdf2zh_next.env_file import resolve_path_from_env_file
 
 # The following is magic code,
 # if you need to modify it,
@@ -41,7 +43,6 @@ _term_translation_engine_flag_names = [
 
 log = logging.getLogger(__name__)
 
-ROOT_DOTENV_FILE = Path(".env")
 _GPT_ACTION_ENV_ALIASES = {
     "GPT_ACTION_QUEUE_DB": "PDF2ZH_GPTACTION_QUEUE_DB",
     "GPT_ACTION_PROTOCOL_VERSION": "PDF2ZH_GPTACTION_PROTOCOL_VERSION",
@@ -330,13 +331,18 @@ class ConfigManager:
         )
 
     def parse_dotenv_vars(self, file_path: Path | None = None) -> dict:
-        """Parse the current project root .env without mutating os.environ."""
-        dotenv_path = file_path or ROOT_DOTENV_FILE
+        """Parse the shared dotenv file without mutating os.environ."""
+        dotenv_path = resolve_env_file_path(file_path)
         values = {
             key: value
             for key, value in dotenv_values(dotenv_path).items()
             if value is not None
         }
+        queue_db = values.get("GPT_ACTION_QUEUE_DB")
+        if queue_db:
+            values["GPT_ACTION_QUEUE_DB"] = str(
+                resolve_path_from_env_file(queue_db, dotenv_path)
+            )
         return self.parse_dict_vars(
             dict_vars=self._with_gptaction_aliases(values),
             prefix="PDF2ZH_",
@@ -603,6 +609,7 @@ class ConfigManager:
         # Parse system environment variables (second priority)
         env_vars = self.parse_env_vars()
         # Parse project-root .env values (third priority)
+        log.info("Loading environment file: %s", resolve_env_file_path())
         dotenv_vars = self.parse_dotenv_vars()
         # Read default configuration file (lower priority)
         default_config_file = self._read_toml_file(self._default_config_file_path)
