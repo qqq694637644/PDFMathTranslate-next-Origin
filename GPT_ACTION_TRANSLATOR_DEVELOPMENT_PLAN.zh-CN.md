@@ -363,6 +363,16 @@ Gradio/CLI 启动一次使用 GPTActionTranslator 的翻译
 
 CLI 顺序处理多个 PDF 时，每个 PDF 创建独立 run；前一个 run 结束后才能激活下一个。第一版不允许两个 active run。
 
+active run 额外维护简单 phase：
+
+```text
+PREPARING
+TRANSLATING
+FINALIZING
+```
+
+创建 run 时为 `PREPARING`；translator 入队或 BabelDOC 翻译 stage 进入 `TRANSLATING`；已有翻译活动后的非翻译 stage 进入 `FINALIZING`。终态仍为 `COMPLETED`、`FAILED`、`CANCELED`。该 phase 只用于告诉 GPT 是否应继续本轮领取，不是 heartbeat 或 worker registry。
+
 主进程被任务管理器强杀、终端直接关闭、断电或系统重启时，无法依赖 `finally` 更新 SQLite。个人版不增加 heartbeat，而是提供本地显式恢复入口：
 
 ```text
@@ -478,7 +488,7 @@ GPT 不操作 PDF 文件、工作目录、终端或构建命令。
 ```json
 {
   "run_id": "run_xxx",
-  "status": "TRANSLATING",
+  "status": "PREPARING | TRANSLATING | FINALIZING",
   "pending": 12,
   "claimed": 8,
   "completed": 300,
@@ -487,6 +497,8 @@ GPT 不操作 PDF 文件、工作目录、终端或构建命令。
 ```
 
 `run_id` 仅用于显示和日志，GPT 不需要在后续调用中回传。`run_active` 只表示 SQLite 中 run 状态为 `ACTIVE`，不声称检测到真实进程存活。`worker_pid` 不暴露给 GPT。
+
+空队列规则：`PREPARING` / `FINALIZING`、或 `TRANSLATING` 且 `pending=0` 时，GPT 停止本轮 Action 调用并向用户报告，不做无间隔轮询。后续由用户再次提示会话检查。
 
 ### 7.2 getNextBatch
 
@@ -533,8 +545,21 @@ max_serialized_response_chars
 立即抛出明确错误
 错误包含 required_chars 和 max_chars
 不插入 PENDING 请求
-当前 BabelDOC 调用失败，而不是永久堵塞队首
+不永久堵塞队首
 ```
+
+批量 `LLM_BATCH` 超限时允许 BabelDOC 官方单段 fallback。translator 通过 `rate_limit_params.request_json_mode` 区分批量请求与最终单段 LLM 请求；最终单段仍超限时记录：
+
+```text
+GPT_ACTION_REQUEST_UNREPRESENTABLE
+request_id
+mode
+fingerprint
+required_chars
+configured_limit
+```
+
+BabelDOC `finish` 事件发送前必须检查该 fatal 状态；存在时 run 进入 `FAILED`，不能输出 `COMPLETED`。
 
 sidecar 与翻译进程统一读取 `GPT_ACTION_MAX_SERIALIZED_RESPONSE_CHARS`，避免两边上限不一致。
 
@@ -581,6 +606,10 @@ pdf2zh-action-queue invalidate-request <request_id>
 ```
 
 只允许在没有 active run 时删除指定 `COMPLETED` 记录。translator 必须记录 `request_id`、`mode` 和 `fingerprint`，便于从 BabelDOC 错误附近定位缓存项。
+
+同一 fingerprint 可能因 `--ignore-cache` 存在多个历史 completed request。个人版允许用户重复按日志失效；后续可选增加 `invalidate-fingerprint`，但不作为第一版要求。
+
+修改 Custom GPT 翻译规则、模型策略或输出协议时必须提高 `GPT_ACTION_PROTOCOL_VERSION`，使 fingerprint 与旧译文隔离。线程数、TTL、端口和队列路径等运行参数不需要提高版本。
 
 建议支持部分提交：
 

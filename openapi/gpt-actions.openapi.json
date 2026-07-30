@@ -247,6 +247,15 @@
           },
           "status": {
             "type": "string",
+            "enum": [
+              "IDLE",
+              "PREPARING",
+              "TRANSLATING",
+              "FINALIZING",
+              "COMPLETED",
+              "FAILED",
+              "CANCELED"
+            ],
             "title": "Status"
           },
           "pending": {
@@ -367,7 +376,7 @@
           },
           "output": {
             "type": "string",
-            "maxLength": 99999,
+            "maxLength": 30000,
             "minLength": 1,
             "title": "Output"
           }

@@ -18,13 +18,15 @@ from typing import Any
 
 from pdf2zh_next.const import DEFAULT_CONFIG_DIR
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_QUEUE_DB = DEFAULT_CONFIG_DIR / "gptaction-queue.sqlite3"
 DEFAULT_MAX_SERIALIZED_RESPONSE_CHARS = 30000
 MIN_ACTION_PAYLOAD_CHARS = 1000
 MAX_ACTION_PAYLOAD_CHARS = 99999
 VALID_MODES = {"LLM_BATCH", "SIMPLE_TEXT"}
 RUN_STATUSES = {"ACTIVE", "COMPLETED", "FAILED", "CANCELED"}
+ACTIVE_RUN_PHASES = {"PREPARING", "TRANSLATING", "FINALIZING"}
+RUN_PHASES = {*ACTIVE_RUN_PHASES, "COMPLETED", "FAILED", "CANCELED"}
 REQUEST_STATUSES = {"PENDING", "CLAIMED", "COMPLETED", "CANCELED"}
 
 
@@ -225,6 +227,7 @@ class GPTActionQueue:
                     status TEXT NOT NULL CHECK (
                         status IN ('ACTIVE', 'COMPLETED', 'FAILED', 'CANCELED')
                     ),
+                    phase TEXT NOT NULL DEFAULT 'PREPARING',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     completed_at TEXT
@@ -265,17 +268,42 @@ class GPTActionQueue:
                 WHERE status IN ('PENDING', 'CLAIMED');
                 """
             )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO schema_info(singleton, version)
-                VALUES (1, ?)
-                """,
-                (SCHEMA_VERSION,),
-            )
             row = connection.execute(
                 "SELECT version FROM schema_info WHERE singleton = 1"
             ).fetchone()
-            if row is None or row["version"] != SCHEMA_VERSION:
+            if row is None:
+                connection.execute(
+                    "INSERT INTO schema_info(singleton, version) VALUES (1, ?)",
+                    (SCHEMA_VERSION,),
+                )
+            elif row["version"] == 1:
+                columns = {
+                    str(column["name"])
+                    for column in connection.execute(
+                        "PRAGMA table_info(translation_runs)"
+                    ).fetchall()
+                }
+                if "phase" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE translation_runs
+                        ADD COLUMN phase TEXT NOT NULL DEFAULT 'PREPARING'
+                        """
+                    )
+                connection.execute(
+                    """
+                    UPDATE translation_runs
+                    SET phase = CASE status
+                        WHEN 'ACTIVE' THEN 'PREPARING'
+                        ELSE status
+                    END
+                    """
+                )
+                connection.execute(
+                    "UPDATE schema_info SET version = ? WHERE singleton = 1",
+                    (SCHEMA_VERSION,),
+                )
+            elif row["version"] != SCHEMA_VERSION:
                 raise GPTActionQueueError(
                     "Unsupported GPT Action queue schema version: "
                     f"{None if row is None else row['version']} "
@@ -319,8 +347,8 @@ class GPTActionQueue:
             connection.execute(
                 """
                 INSERT INTO translation_runs(
-                    run_id, status, created_at, updated_at, completed_at
-                ) VALUES (?, 'ACTIVE', ?, ?, NULL)
+                    run_id, status, phase, created_at, updated_at, completed_at
+                ) VALUES (?, 'ACTIVE', 'PREPARING', ?, ?, NULL)
                 """,
                 (run_id, now, now),
             )
@@ -337,7 +365,7 @@ class GPTActionQueue:
         with self._read_connection() as connection:
             run = connection.execute(
                 """
-                SELECT run_id, created_at, updated_at
+                SELECT run_id, phase, created_at, updated_at
                 FROM translation_runs
                 WHERE status = 'ACTIVE'
                 """
@@ -358,6 +386,7 @@ class GPTActionQueue:
             }
         return {
             "run_id": str(run["run_id"]),
+            "phase": str(run["phase"]),
             "created_at": str(run["created_at"]),
             "updated_at": str(run["updated_at"]),
             "pending": counts.get("PENDING", 0),
@@ -394,7 +423,8 @@ class GPTActionQueue:
             connection.execute(
                 """
                 UPDATE translation_runs
-                SET status = 'FAILED', updated_at = ?, completed_at = ?
+                SET status = 'FAILED', phase = 'FAILED',
+                    updated_at = ?, completed_at = ?
                 WHERE run_id = ? AND status = 'ACTIVE'
                 """,
                 (now, now, run_id),
@@ -421,13 +451,41 @@ class GPTActionQueue:
         if row is None or row["status"] != "ACTIVE":
             raise GPTActionQueueError(f"GPT Action run is not active: {run_id}")
 
+    def update_run_phase(self, run_id: str, phase: str) -> None:
+        if phase not in ACTIVE_RUN_PHASES:
+            raise ValueError(f"Unsupported active GPT Action run phase: {phase}")
+        now = _to_iso()
+        with self._write_transaction() as connection:
+            connection.execute(
+                """
+                UPDATE translation_runs
+                SET phase = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'ACTIVE' AND phase != ?
+                """,
+                (phase, now, run_id, phase),
+            )
+
+    def run_has_requests(self, run_id: str) -> bool:
+        with self._read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM translation_requests
+                WHERE run_id = ?
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return row is not None
+
     def complete_run(self, run_id: str) -> None:
         now = _to_iso()
         with self._write_transaction() as connection:
             connection.execute(
                 """
                 UPDATE translation_runs
-                SET status = 'COMPLETED', updated_at = ?, completed_at = ?
+                SET status = 'COMPLETED', phase = 'COMPLETED',
+                    updated_at = ?, completed_at = ?
                 WHERE run_id = ? AND status = 'ACTIVE'
                 """,
                 (now, now, run_id),
@@ -439,7 +497,8 @@ class GPTActionQueue:
             connection.execute(
                 """
                 UPDATE translation_runs
-                SET status = 'FAILED', updated_at = ?, completed_at = ?
+                SET status = 'FAILED', phase = 'FAILED',
+                    updated_at = ?, completed_at = ?
                 WHERE run_id = ? AND status = 'ACTIVE'
                 """,
                 (now, now, run_id),
@@ -459,7 +518,8 @@ class GPTActionQueue:
             connection.execute(
                 """
                 UPDATE translation_runs
-                SET status = 'CANCELED', updated_at = ?, completed_at = ?
+                SET status = 'CANCELED', phase = 'CANCELED',
+                    updated_at = ?, completed_at = ?
                 WHERE run_id = ? AND status = 'ACTIVE'
                 """,
                 (now, now, run_id),
@@ -504,6 +564,14 @@ class GPTActionQueue:
             ).fetchone()
             if run is None or run["status"] != "ACTIVE":
                 raise GPTActionQueueError(f"GPT Action run is not active: {run_id}")
+            connection.execute(
+                """
+                UPDATE translation_runs
+                SET phase = 'TRANSLATING', updated_at = ?
+                WHERE run_id = ? AND status = 'ACTIVE'
+                """,
+                (now, run_id),
+            )
 
             if reuse_completed:
                 completed = connection.execute(
@@ -872,7 +940,7 @@ class GPTActionQueue:
         with self._read_connection() as connection:
             run = connection.execute(
                 """
-                SELECT run_id, status
+                SELECT run_id, status, phase
                 FROM translation_runs
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -900,9 +968,10 @@ class GPTActionQueue:
                 ).fetchall()
             }
         status = str(run["status"])
+        phase = str(run["phase"])
         return {
             "run_id": str(run["run_id"]),
-            "status": "TRANSLATING" if status == "ACTIVE" else status,
+            "status": phase if status == "ACTIVE" else status,
             "pending": counts.get("PENDING", 0),
             "claimed": counts.get("CLAIMED", 0),
             "completed": counts.get("COMPLETED", 0),

@@ -8,8 +8,8 @@ from pathlib import Path
 
 from pdf2zh_next.env_file import pydantic_env_file_kwargs
 from pdf2zh_next.env_file import resolve_env_file_path
-from pdf2zh_next.gptaction_api import GPTActionAPISettings
 from pdf2zh_next.gptaction_api import create_app
+from pdf2zh_next.gptaction_api import load_api_settings
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
@@ -45,11 +45,16 @@ def export_openapi(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        settings = GPTActionAPISettings(
+        settings = load_api_settings(
+            env_file=env_file,
             api_key="openapi-export-placeholder-key",
             queue_db=str(Path(temp_dir) / "queue.sqlite3"),
         )
         schema = create_app(settings).openapi()
+
+    schema["components"]["schemas"]["SubmitResultItem"]["properties"]["output"][
+        "maxLength"
+    ] = settings.max_output_chars
 
     schema["servers"] = [
         {

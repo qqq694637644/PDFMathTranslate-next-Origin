@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import logging.handlers
 import multiprocessing
@@ -106,6 +107,24 @@ class SubprocessCrashError(TranslationError):
         return super().__str__()
 
 
+class GPTActionRequestUnrepresentableError(TranslationError):
+    """A final single-paragraph request cannot fit in one GPT Action response."""
+
+    error_code = "GPT_ACTION_REQUEST_UNREPRESENTABLE"
+
+    def __init__(self, details: dict):
+        self.details = dict(details)
+        super().__init__(
+            f"{self.error_code}: required_chars={details['required_chars']}, "
+            f"configured_limit={details['configured_limit']}, "
+            f"request_id={details['request_id']}, "
+            f"fingerprint={details['fingerprint']}"
+        )
+
+    def __reduce__(self):
+        return self.__class__, (self.details,)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +156,44 @@ def _subprocess_progress_timeout(settings: SettingsModel) -> float | None:
     ):
         return None
     return 30 * 60
+
+
+def _gptaction_fatal_exception(
+    translator,
+) -> GPTActionRequestUnrepresentableError | None:
+    getter = getattr(translator, "get_fatal_error", None)
+    if getter is None:
+        return None
+    details = getter()
+    if not details:
+        return None
+    return GPTActionRequestUnrepresentableError(details)
+
+
+def _update_gptaction_phase_from_event(
+    queue: GPTActionQueue | None,
+    run_id: str | None,
+    event: dict,
+) -> None:
+    if queue is None or run_id is None:
+        return
+    event_type = str(event.get("type", ""))
+    if event_type not in {
+        "progress",
+        "progress_start",
+        "progress_update",
+        "progress_end",
+    }:
+        return
+    stage = str(event.get("stage", "")).lower()
+    if not stage:
+        return
+    if "translate" in stage:
+        queue.update_run_phase(run_id, "TRANSLATING")
+    elif queue.run_has_requests(run_id):
+        queue.update_run_phase(run_id, "FINALIZING")
+    else:
+        queue.update_run_phase(run_id, "PREPARING")
 
 
 def _translate_wrapper(
@@ -196,6 +253,10 @@ def _translate_wrapper(
                         break
                     # Send normal progress events as before
                     if event["type"] == "finish":
+                        fatal_error = _gptaction_fatal_exception(config.translator)
+                        if fatal_error is not None:
+                            pipe_progress_send.send(fatal_error)
+                            break
                         # Extract token usage
                         token_usage = {}
 
@@ -663,6 +724,7 @@ async def do_translate_async_stream(
 
     gptaction_queue, gptaction_run_id = _start_gptaction_run(settings)
     gptaction_run_terminal = False
+    babeldoc_config = None
 
     try:
         # 开始翻译
@@ -681,7 +743,16 @@ async def do_translate_async_stream(
         async for event in translate_func():
             if settings.basic.debug:
                 logger.debug(event)
+            _update_gptaction_phase_from_event(
+                gptaction_queue,
+                gptaction_run_id,
+                event,
+            )
             if event["type"] == "finish":
+                if babeldoc_config is not None:
+                    fatal_error = _gptaction_fatal_exception(babeldoc_config.translator)
+                    if fatal_error is not None:
+                        raise fatal_error
                 if gptaction_queue is not None and gptaction_run_id is not None:
                     gptaction_queue.complete_run(gptaction_run_id)
                     gptaction_run_terminal = True
@@ -710,6 +781,7 @@ async def do_translate_async_stream(
             "error_type": e.__class__.__name__,
             "details": getattr(e, "original_error", "")
             or getattr(e, "traceback_str", "")
+            or json.dumps(getattr(e, "details", {}), ensure_ascii=False)
             or "",
         }
         yield error_event

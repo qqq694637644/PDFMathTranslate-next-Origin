@@ -103,7 +103,15 @@ class StrictModel(BaseModel):
 
 class QueueStatusResponse(StrictModel):
     run_id: str | None
-    status: str
+    status: Literal[
+        "IDLE",
+        "PREPARING",
+        "TRANSLATING",
+        "FINALIZING",
+        "COMPLETED",
+        "FAILED",
+        "CANCELED",
+    ]
     pending: int
     claimed: int
     completed: int
@@ -300,6 +308,18 @@ def create_app(settings: GPTActionAPISettings | None = None) -> FastAPI:
                 }
             )
         return {"results": results}
+
+    default_openapi = app.openapi
+
+    def configured_openapi() -> dict:
+        schema = default_openapi()
+        schema["components"]["schemas"]["SubmitResultItem"]["properties"]["output"][
+            "maxLength"
+        ] = resolved_settings.max_output_chars
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = configured_openapi
 
     return app
 

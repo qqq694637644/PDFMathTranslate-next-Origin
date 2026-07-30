@@ -182,6 +182,63 @@ def test_translator_rejects_oversized_request_before_waiting(tmp_path) -> None:
         translator.translate("x" * 2000)
 
     assert queue.queue_status()["pending"] == 0
+    fatal_error = translator.get_fatal_error()
+    assert fatal_error is not None
+    assert fatal_error["error_code"] == "GPT_ACTION_REQUEST_UNREPRESENTABLE"
+    assert fatal_error["mode"] == "SIMPLE_TEXT"
+    assert fatal_error["required_chars"] > fatal_error["configured_limit"]
+    assert len(fatal_error["fingerprint"]) == 64
+
+
+def test_oversized_llm_batch_allows_babeldoc_single_paragraph_fallback(
+    tmp_path,
+) -> None:
+    queue_path = tmp_path / "queue.sqlite3"
+    queue = GPTActionQueue(queue_path)
+    run_id = queue.start_run()
+    engine = GPTActionSettings(
+        gptaction_queue_db=str(queue_path),
+        gptaction_max_serialized_response_chars="1000",
+    )
+    engine._gptaction_run_id = run_id
+    translator = GPTActionTranslator(
+        SettingsModel(translate_engine_settings=engine),
+        None,
+    )
+
+    with pytest.raises(QueueItemTooLargeError):
+        translator.llm_translate(
+            "x" * 2000,
+            rate_limit_params={"request_json_mode": True},
+        )
+
+    assert translator.get_fatal_error() is None
+
+
+def test_oversized_single_paragraph_llm_fallback_is_fatal(tmp_path) -> None:
+    queue_path = tmp_path / "queue.sqlite3"
+    queue = GPTActionQueue(queue_path)
+    run_id = queue.start_run()
+    engine = GPTActionSettings(
+        gptaction_queue_db=str(queue_path),
+        gptaction_max_serialized_response_chars="1000",
+    )
+    engine._gptaction_run_id = run_id
+    translator = GPTActionTranslator(
+        SettingsModel(translate_engine_settings=engine),
+        None,
+    )
+
+    with pytest.raises(QueueItemTooLargeError):
+        translator.llm_translate(
+            "x" * 2000,
+            rate_limit_params={"paragraph_token_count": 2000},
+        )
+
+    fatal_error = translator.get_fatal_error()
+    assert fatal_error is not None
+    assert fatal_error["mode"] == "LLM_BATCH"
+    assert fatal_error["error_code"] == "GPT_ACTION_REQUEST_UNREPRESENTABLE"
 
 
 def test_translator_character_limit_must_remain_below_100000(tmp_path) -> None:

@@ -46,6 +46,11 @@ def test_bearer_auth_and_queue_status(tmp_path) -> None:
     assert idle.json()["status"] == "IDLE"
 
     run_id = queue.start_run()
+    preparing = client.get("/v1/actions/queue/status", headers=AUTH)
+    assert preparing.status_code == 200
+    assert preparing.json()["status"] == "PREPARING"
+    assert preparing.json()["pending"] == 0
+
     enqueue(queue, run_id, "Hello")
     active = client.get("/v1/actions/queue/status", headers=AUTH)
     assert active.status_code == 200
@@ -57,6 +62,10 @@ def test_bearer_auth_and_queue_status(tmp_path) -> None:
         "completed": 0,
         "run_active": True,
     }
+
+    queue.update_run_phase(run_id, "FINALIZING")
+    finalizing = client.get("/v1/actions/queue/status", headers=AUTH)
+    assert finalizing.json()["status"] == "FINALIZING"
 
 
 def test_claim_and_partial_submit(tmp_path) -> None:
@@ -133,6 +142,23 @@ def test_openapi_exposes_only_three_action_operations(tmp_path) -> None:
         ]
         is False
     )
+    assert (
+        schema["components"]["schemas"]["SubmitResultItem"]["properties"]["output"][
+            "maxLength"
+        ]
+        == 30000
+    )
+    assert schema["components"]["schemas"]["QueueStatusResponse"]["properties"][
+        "status"
+    ]["enum"] == [
+        "IDLE",
+        "PREPARING",
+        "TRANSLATING",
+        "FINALIZING",
+        "COMPLETED",
+        "FAILED",
+        "CANCELED",
+    ]
 
 
 def test_oversized_item_does_not_rollback_valid_result(tmp_path) -> None:

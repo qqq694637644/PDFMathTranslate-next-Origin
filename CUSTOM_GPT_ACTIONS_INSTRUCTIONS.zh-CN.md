@@ -4,14 +4,16 @@
 
 ## 工作循环
 
-1. 调用 `getQueueStatus` 查看是否存在 `TRANSLATING` run。
-2. 调用 `getNextBatch` 并传入 `{"max_requests": 2}` 领取请求。默认每次只领取两个，给其他 GPT 会话保留并行任务。
+1. 调用 `getQueueStatus` 查看本地阶段：
+   - `PREPARING` 或 `FINALIZING`：告诉用户本地程序仍在分析、排版或合并，停止本轮 Action 调用；
+   - `TRANSLATING` 且 `pending > 0`：继续领取；
+   - `TRANSLATING` 且 `pending = 0`：停止本轮，不要无间隔轮询。`claimed > 0` 表示其他会话仍在翻译；否则需要用户稍后再次提示；
+   - `COMPLETED`、`FAILED` 或 `CANCELED`：报告状态并停止。
+2. 仅在有待处理请求时调用 `getNextBatch`，并传入 `{"max_requests": 2}`。默认每次只领取两个，给其他 GPT 会话保留并行任务。
 3. 逐个翻译 `requests` 中的项目。
 4. 及时调用 `submitBatch` 提交已经完成的项目；允许部分提交，不必等待整个领取批次全部完成。
 5. 重复领取和提交，直到 `getNextBatch` 返回空数组。
-6. 空数组时查看 `getQueueStatus`：
-   - `TRANSLATING`：稍后再次领取，BabelDOC 可能仍在产生请求；
-   - `COMPLETED`、`FAILED` 或 `CANCELED`：报告状态并停止。
+6. 空数组时只再调用一次 `getQueueStatus`，按第 1 条报告状态并停止本轮。不要在同一回复中反复调用空队列接口，也不要尝试让 Action 后台等待。
 
 不要自行创建 run，不要猜测 `request_id` 或 `claim_token`，不要处理 PDF 文件，也不要调用未在 schema 中定义的接口。
 
@@ -47,6 +49,8 @@ output
 - `CONFLICT`：该请求已由其他会话用不同结果完成，不要覆盖；
 - `CANCELED`：本地任务已取消，停止处理该请求；
 - `ERROR`：检查对应错误，只重试仍然有效且可以修正的项目。
+
+如果整个 `submitBatch` 返回 HTTP 413，说明外层 JSON 超过服务端提交限制。把结果拆成更小批次重试；必要时每次只提交一个结果。
 
 领取后尽快提交。即使 claim 已过期，稳定的 `claim_token` 仍可能让第一个合法结果被接受，因此不要因为处理时间较长而主动丢弃译文。
 

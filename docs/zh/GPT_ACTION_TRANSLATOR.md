@@ -178,7 +178,18 @@ max_pages_per_part = 50
 
 GPTActionTranslator 不再设置会覆盖用户输入的推荐线程数。显式命令行、系统环境或 `.env` 中的 `pool_max_workers` 会保持生效，不会被静默改回 8。
 
-BabelDOC 线程会逐步产生请求。Custom GPT 可以反复调用 `getNextBatch`，翻译后调用 `submitBatch`；请求完成后，对应 BabelDOC 线程继续执行。
+BabelDOC 线程会逐步产生请求。Custom GPT 在队列有 `pending` 请求时调用 `getNextBatch`，翻译后调用 `submitBatch`；请求完成后，对应 BabelDOC 线程继续执行。
+
+队列状态区分：
+
+```text
+PREPARING   PDF 解析、layout/OCR/table 分析或下一 part 准备
+TRANSLATING 已进入翻译阶段
+FINALIZING  当前 part 排版、输出或最终 PDF 合并
+COMPLETED / FAILED / CANCELED 终态
+```
+
+`PREPARING`、`FINALIZING` 或空队列时，Custom GPT 应停止本轮调用并告诉用户本地程序仍在工作，不做无间隔轮询。用户可以稍后再次提示会话继续检查。该 phase 只是本机 SQLite 状态，不是后台唤醒或调度服务。
 
 GPTAction 模式不会使用原有的 30 分钟“无进度事件”超时。只要进程仍在运行，用户可以暂停领取请求，数小时后继续；当前 PDF 分片和 BabelDOC 内存也会继续驻留。
 
@@ -204,7 +215,7 @@ API 不复制 BabelDOC 的 JSON、ID、placeholder 或长度校验；这些仍�
 - 已完成请求提交不同结果返回 `CONFLICT`。
 - 一个批次中的合法结果会独立完成，其他错误项不会回滚。
 - 单项 output 超过上限时仅该项返回 `ERROR`。
-- 请求在写入 SQLite 前会按完整单项 Action envelope 预检；如果单项本身超过响应上限，当前 BabelDOC 翻译会立即明确失败，不会留下永久堵塞队首的请求。
+- 请求在写入 SQLite 前会按完整单项 Action envelope 预检。批量 `LLM_BATCH` 超限时，异常会交给官方 BabelDOC 尝试单段 fallback；只有最终单段 prompt 仍然超限时才记录 fatal overflow。BabelDOC 发出 `finish` 前，应用会将其转换为 `GPT_ACTION_REQUEST_UNREPRESENTABLE` 并把 run 标记 `FAILED`，不会留下永久堵塞请求，也不会把缺失段落的 PDF 标成完成。
 
 ## 取消和恢复
 
@@ -286,6 +297,10 @@ GPT_ACTION_MAX_SUBMIT_CHARS
 GPT_ACTION_MAX_OUTPUT_CHARS
 ```
 
+`python script/export_gptaction_openapi.py` 会读取当前配置，把 `SubmitResultItem.output.maxLength` 写成实际的 `GPT_ACTION_MAX_OUTPUT_CHARS`。默认是 `30000`，因此静态契约不会允许服务端必然拒绝的 40000 字符单项结果。
+
+如果 `submitBatch` 整体返回 HTTP 413，应将结果拆成更小批次；必要时一次只提交一个结果。
+
 ### 清除一个已知错误的缓存结果
 
 translator 日志会打印：
@@ -303,6 +318,25 @@ pdf2zh-action-queue invalidate-request req_xxx
 ```
 
 命令默认要求输入完整 `request_id` 确认，也支持 `--yes`。删除后，下次相同 fingerprint 会重新进入 GPT Actions 队列。active run 存在时命令会拒绝执行，避免删除仍有线程等待的结果。
+
+使用 `--ignore-cache` 可能为同一 fingerprint 留下多个历史 `COMPLETED` 结果。如果失效一个 request 后仍命中旧结果，继续根据 translator 日志失效同 fingerprint 的其他历史 request。
+
+### 什么时候修改协议版本
+
+修改以下翻译语义后，应提高版本，例如从 `1` 改为 `2`：
+
+```text
+Custom GPT 系统指令
+翻译风格或术语规则
+模型选择或模型使用策略
+要求 GPT 返回的输出协议
+```
+
+这样相同 BabelDOC prompt 会生成不同 fingerprint，不会复用旧译文。仅修改线程数、claim TTL、API 端口或队列路径时不需要提高 `GPT_ACTION_PROTOCOL_VERSION`。
+
+### Docker
+
+默认 Docker `CMD` 只启动 GUI，不会同时启动 `pdf2zh-action-api`。使用 Docker 部署 GPT Actions 时需要两个进程或两个容器，并让它们共享同一个 queue DB volume；当前个人版不内置进程管理器。
 
 ### 为什么自动术语提取被关闭
 

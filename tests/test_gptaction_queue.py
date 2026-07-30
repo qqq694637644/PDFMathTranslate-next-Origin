@@ -39,6 +39,59 @@ def test_mode_aware_fingerprint() -> None:
     assert simple != batch
 
 
+def test_run_phase_transitions_are_visible_in_queue_status(tmp_path) -> None:
+    queue = GPTActionQueue(tmp_path / "queue.sqlite3")
+    run_id = queue.start_run()
+
+    assert queue.queue_status()["status"] == "PREPARING"
+
+    enqueue(queue, run_id, "Hello")
+    assert queue.queue_status()["status"] == "TRANSLATING"
+
+    queue.update_run_phase(run_id, "FINALIZING")
+    assert queue.queue_status()["status"] == "FINALIZING"
+
+    queue.complete_run(run_id)
+    assert queue.queue_status()["status"] == "COMPLETED"
+
+
+def test_schema_version_one_is_migrated_with_preparing_phase(tmp_path) -> None:
+    database_path = tmp_path / "queue.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO schema_info(singleton, version) VALUES (1, 1);
+            CREATE TABLE translation_runs (
+                run_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            INSERT INTO translation_runs(
+                run_id, status, created_at, updated_at, completed_at
+            ) VALUES ('run_old', 'ACTIVE', '2026-01-01', '2026-01-01', NULL);
+            """
+        )
+
+    queue = GPTActionQueue(database_path)
+
+    assert queue.queue_status()["status"] == "PREPARING"
+    with sqlite3.connect(database_path) as connection:
+        version = connection.execute(
+            "SELECT version FROM schema_info WHERE singleton = 1"
+        ).fetchone()[0]
+        phase = connection.execute(
+            "SELECT phase FROM translation_runs WHERE run_id = 'run_old'"
+        ).fetchone()[0]
+    assert version == 2
+    assert phase == "PREPARING"
+
+
 def test_single_active_run_and_completed_result_reuse(tmp_path) -> None:
     queue = GPTActionQueue(tmp_path / "queue.sqlite3")
     run_id = queue.start_run()
